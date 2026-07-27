@@ -7,9 +7,25 @@ human scratchpad. Alerts appear only while active at the top of the left
 sidebar. The agent summary appears beneath Questions as a Status accordion,
 automatically expands when updated, and can be collapsed to its headline.
 
-## Run it
+## Prerequisites
 
-Prerequisites: Node.js 20+, Rust 1.88+, and the macOS developer tools.
+- Node.js 20+
+- Rust 1.88+
+- macOS developer tools
+- [Codex CLI](https://developers.openai.com/codex/cli), installed and
+  authenticated
+
+Telemachus uses `codex exec` for artifact reviews. The Codex CLI is a required
+system prerequisite and is not installed by this project's npm dependencies.
+
+```bash
+npm install --global @openai/codex
+codex login
+codex --version
+codex login status
+```
+
+## Run it
 
 ```bash
 npm install
