@@ -400,6 +400,15 @@ export async function getClosedGithubPullRequests(
   return [];
 }
 
+export async function discoverOpenGithubPullRequests(
+  taskId: string,
+): Promise<PresentationDocument | null> {
+  if (isTauri()) {
+    return invoke("discover_open_github_pull_requests", { taskId });
+  }
+  return null;
+}
+
 export async function launchCodexArtifactReview(
   sourceTaskId: string,
   resources: Resource[],

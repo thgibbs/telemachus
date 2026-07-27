@@ -382,6 +382,7 @@ impl TerminalBuffer {
 pub struct AppState {
     db: Mutex<Connection>,
     terminals: Mutex<HashMap<String, Arc<TerminalSession>>>,
+    closed_terminal_pull_requests: Mutex<HashMap<String, HashSet<String>>>,
     tokens: Mutex<HashMap<String, String>>,
     bridge_endpoint: RwLock<String>,
     waiters: Mutex<HashMap<String, oneshot::Sender<WaitResult>>>,
@@ -397,6 +398,7 @@ impl AppState {
         Ok(Self {
             db: Mutex::new(connection),
             terminals: Mutex::new(HashMap::new()),
+            closed_terminal_pull_requests: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
             bridge_endpoint: RwLock::new(String::new()),
             waiters: Mutex::new(HashMap::new()),
@@ -413,6 +415,7 @@ impl AppState {
         Self {
             db: Mutex::new(connection),
             terminals: Mutex::new(HashMap::new()),
+            closed_terminal_pull_requests: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
             bridge_endpoint: RwLock::new("http://127.0.0.1:1".into()),
             waiters: Mutex::new(HashMap::new()),
@@ -1729,6 +1732,248 @@ fn github_pull_request_reference(target: &str) -> Result<GitHubPullRequestRefere
     })
 }
 
+fn github_pull_request_identity(reference: &GitHubPullRequestReference) -> String {
+    format!(
+        "{}/{}#{}",
+        reference.owner.to_ascii_lowercase(),
+        reference.repository.to_ascii_lowercase(),
+        reference.number
+    )
+}
+
+fn canonical_github_pull_request_url(reference: &GitHubPullRequestReference) -> String {
+    format!(
+        "https://github.com/{}/{}/pull/{}",
+        reference.owner, reference.repository, reference.number
+    )
+}
+
+fn terminal_github_pull_request_urls(output: &str) -> Vec<String> {
+    let prefix = "https://github.com/";
+    let mut seen = HashSet::new();
+    let mut urls = Vec::new();
+    for (start, _) in output.match_indices(prefix) {
+        let candidate = &output[start..];
+        let end = candidate
+            .char_indices()
+            .find_map(|(index, character)| {
+                (character.is_whitespace()
+                    || character.is_control()
+                    || matches!(character, '"' | '\'' | '<' | '>' | '`'))
+                .then_some(index)
+            })
+            .unwrap_or(candidate.len());
+        let candidate = candidate[..end]
+            .trim_end_matches(|character: char| {
+                matches!(character, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}')
+            });
+        let Ok(reference) = github_pull_request_reference(candidate) else {
+            continue;
+        };
+        let canonical = canonical_github_pull_request_url(&reference);
+        if seen.insert(github_pull_request_identity(&reference)) {
+            urls.push(canonical);
+        }
+    }
+    urls
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubPullRequestView {
+    state: String,
+    title: String,
+}
+
+fn github_pull_request_view(target: &str) -> Result<GitHubPullRequestView, String> {
+    let output = ProcessCommand::new(github_cli_path())
+        .args(["pr", "view"])
+        .arg(target)
+        .args(["--json", "state,title"])
+        .env("GH_PROMPT_DISABLED", "1")
+        .output()
+        .map_err(display_error)?;
+    if !output.status.success() {
+        return Err("github_pull_request_lookup_failed".into());
+    }
+    serde_json::from_slice(&output.stdout).map_err(display_error)
+}
+
+fn next_terminal_pull_request_id(document: &PresentationDocument, number: u64) -> String {
+    let base = format!("terminal-pr-{number}");
+    if !document.resources.iter().any(|resource| resource.id == base) {
+        return base;
+    }
+    for suffix in 2.. {
+        let candidate = format!("{base}-{suffix}");
+        if !document
+            .resources
+            .iter()
+            .any(|resource| resource.id == candidate)
+        {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+#[tauri::command]
+fn discover_open_github_pull_requests(
+    state: tauri::State<'_, Arc<AppState>>,
+    task_id: String,
+) -> Result<PresentationDocument, String> {
+    discover_open_github_pull_requests_core(&state, task_id)
+}
+
+fn discover_open_github_pull_requests_core(
+    state: &AppState,
+    task_id: String,
+) -> Result<PresentationDocument, String> {
+    validate_id(&task_id)?;
+    let session = state
+        .terminals
+        .lock()
+        .map_err(display_error)?
+        .values()
+        .find(|session| session.task_id == task_id)
+        .cloned();
+    let Some(session) = session else {
+        return get_document_core(state, &task_id);
+    };
+    let output = session
+        .output
+        .lock()
+        .map_err(display_error)?
+        .data
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    let candidates = terminal_github_pull_request_urls(&String::from_utf8_lossy(&output));
+    if candidates.is_empty() {
+        return get_document_core(state, &task_id);
+    }
+
+    let document = get_document_core(state, &task_id)?;
+    let existing = document
+        .resources
+        .iter()
+        .filter(|resource| resource.resource_type == "github_pr")
+        .filter_map(|resource| github_pull_request_reference(&resource.path_or_url).ok())
+        .map(|reference| github_pull_request_identity(&reference))
+        .collect::<HashSet<_>>();
+    let known_closed = state
+        .closed_terminal_pull_requests
+        .lock()
+        .map_err(display_error)?
+        .get(&task_id)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut discovered = Vec::new();
+    let mut closed = Vec::new();
+    let mut lookups = 0;
+    for candidate in candidates {
+        let reference = github_pull_request_reference(&candidate)?;
+        let identity = github_pull_request_identity(&reference);
+        if existing.contains(&identity) || known_closed.contains(&identity) {
+            continue;
+        }
+        if lookups >= 20 {
+            break;
+        }
+        lookups += 1;
+        let Ok(view) = github_pull_request_view(&candidate) else {
+            continue;
+        };
+        match view.state.trim().to_ascii_lowercase().as_str() {
+            "open" => discovered.push((reference, view.title)),
+            "closed" | "merged" => closed.push(identity),
+            _ => {}
+        }
+    }
+    if !closed.is_empty() {
+        state
+            .closed_terminal_pull_requests
+            .lock()
+            .map_err(display_error)?
+            .entry(task_id.clone())
+            .or_default()
+            .extend(closed);
+    }
+    if discovered.is_empty() {
+        return Ok(document);
+    }
+
+    let mut connection = state.db.lock().map_err(display_error)?;
+    let transaction = connection.transaction().map_err(display_error)?;
+    let document_json: String = transaction
+        .query_row(
+            "SELECT document_json FROM tasks WHERE id = ?1",
+            [&task_id],
+            |row| row.get(0),
+        )
+        .map_err(display_error)?;
+    let mut document: PresentationDocument =
+        serde_json::from_str(&document_json).map_err(display_error)?;
+    let mut identities = document
+        .resources
+        .iter()
+        .filter(|resource| resource.resource_type == "github_pr")
+        .filter_map(|resource| github_pull_request_reference(&resource.path_or_url).ok())
+        .map(|reference| github_pull_request_identity(&reference))
+        .collect::<HashSet<_>>();
+    let mut changed = false;
+    for (reference, title) in discovered {
+        if !identities.insert(github_pull_request_identity(&reference)) {
+            continue;
+        }
+        let id = next_terminal_pull_request_id(&document, reference.number);
+        document.resources.push(Resource {
+            id,
+            resource_type: "github_pr".into(),
+            label: if title.trim().is_empty() {
+                format!(
+                    "{}/{}#{}",
+                    reference.owner, reference.repository, reference.number
+                )
+            } else {
+                title
+            },
+            path_or_url: canonical_github_pull_request_url(&reference),
+            status: ResourceStatus::Reported,
+            metadata: HashMap::from([
+                ("github_state".into(), "open".into()),
+                ("discovered_from".into(), "terminal".into()),
+            ]),
+        });
+        changed = true;
+    }
+    if !changed {
+        return Ok(document);
+    }
+    validate_document(&document)?;
+    document.revision += 1;
+    document.updated_at = now();
+    transaction
+        .execute(
+            "UPDATE tasks SET document_json = ?1, updated_at = ?2 WHERE id = ?3",
+            params![
+                serde_json::to_string(&document).map_err(display_error)?,
+                document.updated_at,
+                task_id
+            ],
+        )
+        .map_err(display_error)?;
+    transaction.commit().map_err(display_error)?;
+    drop(connection);
+    emit_presentation_updated(
+        state,
+        &task_id,
+        Some("terminal-discovery"),
+        Some("replace_resources"),
+    );
+    Ok(document)
+}
+
 fn github_issue_reference(target: &str) -> Result<GitHubIssueReference, String> {
     validate_github_issue_url(target)?;
     let parsed = url::Url::parse(target).map_err(display_error)?;
@@ -2825,6 +3070,7 @@ pub fn run() {
             close_terminal,
             open_artifact,
             get_closed_github_pull_requests,
+            discover_open_github_pull_requests,
             launch_codex_artifact_review,
             get_bridge_info
         ])
@@ -2907,6 +3153,24 @@ mod tests {
         assert!(github_pull_request_state_is_closed("CLOSED\n"));
         assert!(github_pull_request_state_is_closed("merged"));
         assert!(!github_pull_request_state_is_closed("OPEN"));
+    }
+
+    #[test]
+    fn terminal_output_discovers_and_canonicalizes_pull_request_links() {
+        let output = concat!(
+            "\u{1b}[32mCreated https://github.com/openai/codex/pull/123\u{1b}[0m\n",
+            "Review: https://github.com/acme/store/pull/42/files).\n",
+            "Duplicate: https://github.com/openai/codex/pull/123?notification_referrer=1\n",
+            "Not a PR: https://github.com/openai/codex/issues/123\n",
+            "Not GitHub: https://example.com/acme/store/pull/42\n"
+        );
+        assert_eq!(
+            terminal_github_pull_request_urls(output),
+            vec![
+                "https://github.com/openai/codex/pull/123",
+                "https://github.com/acme/store/pull/42",
+            ]
+        );
     }
 
     #[test]

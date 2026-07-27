@@ -15,10 +15,12 @@ export function TerminalPane({
   taskId,
   active,
   textScale,
+  onOutputActivity,
 }: {
   taskId: string;
   active: boolean;
   textScale: number;
+  onOutputActivity?: () => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -27,9 +29,11 @@ export function TerminalPane({
   const activeRef = useRef(active);
   const inputArmedRef = useRef(false);
   const recoveryArmedRef = useRef(false);
+  const onOutputActivityRef = useRef(onOutputActivity);
   const [legacyHost, setLegacyHost] = useState(false);
   const [recovering, setRecovering] = useState(false);
   activeRef.current = active;
+  onOutputActivityRef.current = onOutputActivity;
 
   const reportError = (error: unknown) => {
     console.error("Telemachus terminal error", error);
@@ -217,6 +221,7 @@ export function TerminalPane({
         );
         setRecovering(false);
         setLegacyHost(true);
+        onOutputActivityRef.current?.();
         return;
       }
       if (
@@ -235,6 +240,7 @@ export function TerminalPane({
         );
         setRecovering(false);
         setLegacyHost(true);
+        onOutputActivityRef.current?.();
         return;
       }
       if (!sessionRef.current) {
@@ -248,6 +254,7 @@ export function TerminalPane({
         return;
       }
       terminal.write(new Uint8Array(payload.data));
+      onOutputActivityRef.current?.();
     });
     outputListenerReady.then((cleanup) => {
       if (cancelled) cleanup();
@@ -293,6 +300,7 @@ export function TerminalPane({
             });
           attached = true;
           pendingOutput.length = 0;
+          onOutputActivityRef.current?.();
           requestAnimationFrame(() => {
             fitAndResize();
             if (activeRef.current) {

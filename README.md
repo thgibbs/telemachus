@@ -99,6 +99,13 @@ it is reported twice. The desktop app also removes closed or merged PRs after
 checking GitHub; an agent can make that immediate with
 `agent-ui artifact update pr --meta github_state=closed`.
 
+Telemachus also watches each task's retained terminal output for GitHub pull
+request links. After terminal activity settles, it verifies newly discovered
+links with the authenticated GitHub CLI and adds only open PRs that are not
+already present in Artifacts. URLs printed across terminal output chunks are
+covered by the retained-output scan; closed PRs and failed lookups are not
+added.
+
 Every open PR artifact has a **Review** button, and the Artifacts heading has a
 **Review** action for all open PRs. Local-document artifacts also have an
 individual **Review** button. Reviews run non-interactively in the background

@@ -40,6 +40,7 @@ import {
   answerQuestion,
   applyOperation,
   completeTodo,
+  discoverOpenGithubPullRequests,
   getBridgeInfo,
   getClosedGithubPullRequests,
   openArtifact,
@@ -195,10 +196,15 @@ export function TaskWorkspace({
   const [artifactReviewError, setArtifactReviewError] = useState("");
   const [pullRequestReviewError, setPullRequestReviewError] = useState("");
   const workspaceRef = useRef<HTMLDivElement>(null);
+  const documentRevisionRef = useRef(document.revision);
+  const pullRequestDiscoveryTimerRef = useRef<number | null>(null);
+  const pullRequestDiscoveryInFlightRef = useRef(false);
+  const pullRequestDiscoveryPendingRef = useRef(false);
   const dragRef = useRef<{
     startX: number;
     startWidth: number;
   } | null>(null);
+  documentRevisionRef.current = document.revision;
 
   useEffect(() => setLayout(task.layout), [task.layout]);
 
@@ -283,6 +289,52 @@ export function TaskWorkspace({
     await updateLayout(task.id, next);
     onTaskChanged();
   }
+
+  async function runTerminalPullRequestDiscovery() {
+    if (!active) return;
+    if (pullRequestDiscoveryInFlightRef.current) {
+      pullRequestDiscoveryPendingRef.current = true;
+      return;
+    }
+    pullRequestDiscoveryInFlightRef.current = true;
+    try {
+      const next = await discoverOpenGithubPullRequests(task.id);
+      if (next && next.revision > documentRevisionRef.current) {
+        documentRevisionRef.current = next.revision;
+        onDocument(next);
+        onTaskChanged();
+      }
+    } catch {
+      // Authentication or network failures are retried after later output.
+    } finally {
+      pullRequestDiscoveryInFlightRef.current = false;
+      if (pullRequestDiscoveryPendingRef.current) {
+        pullRequestDiscoveryPendingRef.current = false;
+        scheduleTerminalPullRequestDiscovery();
+      }
+    }
+  }
+
+  function scheduleTerminalPullRequestDiscovery() {
+    if (!active) return;
+    if (pullRequestDiscoveryTimerRef.current !== null) {
+      window.clearTimeout(pullRequestDiscoveryTimerRef.current);
+    }
+    pullRequestDiscoveryTimerRef.current = window.setTimeout(() => {
+      pullRequestDiscoveryTimerRef.current = null;
+      void runTerminalPullRequestDiscovery();
+    }, 1200);
+  }
+
+  useEffect(() => {
+    if (active) scheduleTerminalPullRequestDiscovery();
+    return () => {
+      if (pullRequestDiscoveryTimerRef.current !== null) {
+        window.clearTimeout(pullRequestDiscoveryTimerRef.current);
+        pullRequestDiscoveryTimerRef.current = null;
+      }
+    };
+  }, [active, task.id]);
 
   const openTodos = document.questions.filter((todo) => todo.state === "open");
   const activeAlerts = document.alerts.filter((a) => a.state !== "cleared");
@@ -824,6 +876,7 @@ export function TaskWorkspace({
           taskId={task.id}
           active={active}
           textScale={textScale}
+          onOutputActivity={scheduleTerminalPullRequestDiscovery}
         />
       </main>
       </div>
