@@ -1733,13 +1733,13 @@ described above before exiting.",
 
 fn codex_review_arguments(prompt: String) -> Vec<String> {
     vec![
+        "-a".into(),
+        "never".into(),
         "exec".into(),
         "-m".into(),
         CODEX_REVIEW_MODEL.into(),
         "-c".into(),
         CODEX_REVIEW_REASONING_CONFIG.into(),
-        "-a".into(),
-        "never".into(),
         "-s".into(),
         "workspace-write".into(),
         "-c".into(),
@@ -1757,12 +1757,8 @@ fn executable_on_path(name: &str) -> Option<PathBuf> {
 }
 
 fn locate_codex_cli() -> Result<PathBuf, String> {
-    #[cfg(target_os = "macos")]
-    {
-        let bundled = PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex");
-        if bundled.is_file() {
-            return Ok(bundled);
-        }
+    if let Some(path) = executable_on_path("codex") {
+        return Ok(path);
     }
     if let Some(home) = std::env::var_os("HOME") {
         for relative in [".local/bin/codex", ".npm-global/bin/codex"] {
@@ -1771,9 +1767,6 @@ fn locate_codex_cli() -> Result<PathBuf, String> {
                 return Ok(candidate);
             }
         }
-    }
-    if let Some(path) = executable_on_path("codex") {
-        return Ok(path);
     }
     for candidate in ["/opt/homebrew/bin/codex", "/usr/local/bin/codex"] {
         let path = PathBuf::from(candidate);
@@ -2851,7 +2844,14 @@ mod tests {
         assert!(prompt.contains("Do not merely print the review"));
 
         let arguments = codex_review_arguments(prompt);
-        assert_eq!(arguments.first().map(String::as_str), Some("exec"));
+        assert_eq!(
+            arguments
+                .iter()
+                .take(3)
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["-a", "never", "exec"]
+        );
         assert!(arguments
             .windows(2)
             .any(|pair| pair == ["-m", CODEX_REVIEW_MODEL]));
