@@ -195,19 +195,28 @@ Artifact JSON is an array:
 `agent-ui resource ...` remains as a backward-compatible alias for the same
 unified collection. It does not address a separate panel.
 
-## Questions
+## Human to dos
 
 ```bash
-agent-ui question list [--state open]
-agent-ui question get ID
-agent-ui question ask ID TEXT \
+agent-ui todo list [--state open] [--kind question|action]
+agent-ui todo get ID
+agent-ui todo add ID TEXT [--blocking] [--timeout SECONDS]
+agent-ui todo ask ID TEXT \
   [--choice VALUE ...] [--timeout SECONDS] [--no-free-text]
-agent-ui question ask ID TEXT --non-blocking
+agent-ui todo ask ID TEXT --non-blocking
 ```
 
-A blocking question waits for an answer for 300 seconds by default. It returns
-exit code 3 if the wait times out or is cancelled. `--non-blocking` creates the
-question and returns immediately; poll it with `question get`.
+`todo add` creates an action for the human, such as deploying, merging, or
+reviewing. Actions are non-blocking by default; `--blocking` waits up to 300
+seconds for the human to mark the item done.
+
+`todo ask` creates a question. Questions are blocking by default and wait up to
+300 seconds for an answer. `--non-blocking` returns immediately. Poll either
+kind with `todo get`. A blocking todo returns exit code 3 if the wait times out
+or is cancelled.
+
+`agent-ui question list|get|ask` remains available as a question-only
+compatibility alias.
 
 ## Whole-screen publication
 
@@ -246,7 +255,7 @@ Compatibility aliases from the prototype remain available: `set-task`,
 | 0 | Success |
 | 1 | Rejected input or missing presentation item |
 | 2 | Retryable revision conflict |
-| 3 | Question timed out or was cancelled |
+| 3 | Blocking todo timed out or was cancelled |
 | 4 | Bridge unavailable, missing context, or authentication failure |
 | 64 | Invalid command usage |
 

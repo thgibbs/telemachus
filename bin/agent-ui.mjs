@@ -594,21 +594,27 @@ async function artifactCommand(subcommand, noun = "artifact") {
   );
 }
 
-async function questionCommand(subcommand) {
+async function questionCommand(subcommand, noun = "question") {
   if (subcommand === "list") {
     const body = await context();
     const state = takeOption("state");
-    const questions = state
-      ? body.document.questions.filter((question) => question.state === state)
-      : body.document.questions;
+    ensureNoOptions();
+    const questions = body.document.questions.filter(
+      (item) =>
+        (item.kind ?? "question") === "question" &&
+        (!state || item.state === state),
+    );
     print(questions);
     return;
   }
   if (subcommand === "get") {
     const id = argv.shift();
-    if (!id) usageError("question get requires ID");
+    if (!id) usageError(`${noun} get requires ID`);
+    ensureNoOptions();
     const body = await context();
-    const question = body.document.questions.find((item) => item.id === id);
+    const question = body.document.questions.find(
+      (item) => item.id === id && (item.kind ?? "question") === "question",
+    );
     if (!question) {
       throw new CliError("question_not_found", `no question named ${id}`);
     }
@@ -619,7 +625,7 @@ async function questionCommand(subcommand) {
     const id = argv.shift();
     const textOption = takeOption("text");
     const text = textOption ?? takePositional();
-    if (!id || !text) usageError("question ask requires ID and TEXT");
+    if (!id || !text) usageError(`${noun} ask requires ID and TEXT`);
     const choices = takeOptions("choice");
     const blocking = !takeFlag("non-blocking");
     const waitSeconds = blocking
@@ -631,6 +637,7 @@ async function questionCommand(subcommand) {
       "ask_user",
       {
         id,
+        kind: "question",
         text,
         blocking,
         choices,
@@ -647,7 +654,79 @@ async function questionCommand(subcommand) {
     }
     return;
   }
-  usageError("question requires list, get, or ask");
+  usageError(`${noun} requires list, get, or ask`);
+}
+
+async function todoCommand(subcommand) {
+  if (subcommand === "ask") {
+    return questionCommand("ask", "todo");
+  }
+  if (subcommand === "list") {
+    const body = await context();
+    const state = takeOption("state");
+    const kind = takeOption("kind");
+    if (kind && !["question", "action"].includes(kind)) {
+      usageError("--kind must be question or action");
+    }
+    ensureNoOptions();
+    const todos = body.document.questions
+      .filter(
+        (item) =>
+          (!state || item.state === state) &&
+          (!kind || (item.kind ?? "question") === kind),
+      )
+      .map((item) => ({ kind: "question", ...item }));
+    print(todos);
+    return;
+  }
+  if (subcommand === "get") {
+    const id = argv.shift();
+    if (!id) usageError("todo get requires ID");
+    ensureNoOptions();
+    const body = await context();
+    const todo = body.document.questions.find((item) => item.id === id);
+    if (!todo) {
+      throw new CliError("todo_not_found", `no todo named ${id}`);
+    }
+    print({ kind: "question", ...todo });
+    return;
+  }
+  if (subcommand === "add") {
+    const id = argv.shift();
+    const textOption = takeOption("text");
+    const text = textOption ?? takePositional();
+    if (!id || !text) usageError("todo add requires ID and TEXT");
+    const blocking = takeFlag("blocking");
+    const timeout = takeOption("timeout");
+    if (timeout !== undefined && !blocking) {
+      usageError("--timeout requires --blocking");
+    }
+    const waitSeconds = blocking
+      ? parseInteger(timeout ?? "300", "timeout", 1)
+      : 0;
+    ensureNoOptions();
+    const body = await operate(
+      "ask_user",
+      {
+        id,
+        kind: "action",
+        text,
+        blocking,
+        choices: [],
+        allow_free_text: false,
+        answer: null,
+        state: "open",
+        created_at: new Date().toISOString(),
+      },
+      { waitSeconds },
+    );
+    printWrite(body, "ask_user");
+    if (body.wait && body.wait.status !== "completed") {
+      process.exitCode = 3;
+    }
+    return;
+  }
+  usageError("todo requires list, get, add, or ask");
 }
 
 async function publishCommand() {
@@ -822,8 +901,8 @@ Read:
   agent-ui summary get
   agent-ui alert list
   agent-ui artifact list
-  agent-ui question list [--state open]
-  agent-ui question get ID
+  agent-ui todo list [--state open] [--kind question|action]
+  agent-ui todo get ID
 
 Write task state:
   agent-ui task set --title TITLE [--description TEXT] [--issue-url URL] [--status STATUS] [--message TEXT]
@@ -853,10 +932,12 @@ Write summary, alerts, and artifacts:
 
 Compatibility:
   agent-ui resource ...    Alias for agent-ui artifact ...
+  agent-ui question ...    Question-only alias for agent-ui todo ...
 
-Questions:
-  agent-ui question ask ID TEXT [--choice VALUE ...] [--timeout SECONDS]
-  agent-ui question ask ID TEXT --non-blocking
+Human to dos:
+  agent-ui todo add ID TEXT [--blocking] [--timeout SECONDS]
+  agent-ui todo ask ID TEXT [--choice VALUE ...] [--timeout SECONDS]
+  agent-ui todo ask ID TEXT --non-blocking
 
 Whole-screen and low-level updates:
   agent-ui publish --file presentation.json
@@ -875,7 +956,7 @@ Exit codes:
   0 success
   1 rejected input or missing presentation item
   2 retryable conflict
-  3 question timed out or was cancelled
+  3 blocking todo timed out or was cancelled
   4 bridge unavailable or authentication failed
   64 command usage error
 
@@ -938,6 +1019,7 @@ async function main() {
   }
   if (command === "resource") return artifactCommand(argv.shift(), "resource");
   if (command === "artifact") return artifactCommand(argv.shift());
+  if (command === "todo") return todoCommand(argv.shift());
   if (command === "question") return questionCommand(argv.shift());
   if (command === "publish") return publishCommand();
   if (command === "demo") return demo();

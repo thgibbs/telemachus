@@ -35,7 +35,7 @@ import { SidebarMagnifier } from "./components/SidebarMagnifier";
 type TextSize = "standard" | "large" | "extra-large";
 type PresentationSection =
   | "header"
-  | "questions"
+  | "todos"
   | "plan"
   | "artifacts"
   | "summary"
@@ -84,7 +84,7 @@ function changedSection(
     case "upsert_task":
       return "plan";
     case "ask_user":
-      return "questions";
+      return "todos";
     case "set_summary":
       return "summary";
     case "raise_alert":
@@ -648,8 +648,8 @@ export function App() {
             </div>
             <h1>Start with a task</h1>
             <p>
-              Each task keeps a terminal, plan, questions, summary, alerts, and
-              resources together.
+              Each task keeps a terminal, plan, human to dos, summary, alerts,
+              and artifacts together.
             </p>
             <button className="button primary" onClick={() => addTask(true)}>
               <Plus size={16} /> New task

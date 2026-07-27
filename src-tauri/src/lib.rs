@@ -96,14 +96,25 @@ pub struct PresentedTask {
 pub enum QuestionState {
     Open,
     Answered,
+    Completed,
     TimedOut,
     Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoKind {
+    #[default]
+    Question,
+    Action,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Question {
     pub id: String,
+    #[serde(default)]
+    pub kind: TodoKind,
     pub text: String,
     #[serde(default = "default_true")]
     pub blocking: bool,
@@ -812,6 +823,10 @@ fn apply_to_document(
         }
         "ask_user" => {
             let mut payload: Question = serde_json::from_value(payload).map_err(payload_error)?;
+            if payload.kind == TodoKind::Action {
+                payload.choices.clear();
+                payload.allow_free_text = false;
+            }
             payload.answer = None;
             payload.state = QuestionState::Open;
             if let Some(item) = document
@@ -922,6 +937,11 @@ fn validate_document(document: &PresentationDocument) -> Result<(), String> {
         validate_id(&question.id)?;
         validate_string("question.text", &question.text, 8192)?;
         validate_collection("question.choices", &question.choices)?;
+        if question.kind == TodoKind::Action
+            && (!question.choices.is_empty() || question.allow_free_text)
+        {
+            return Err("invalid_action_todo".into());
+        }
         for choice in &question.choices {
             validate_string("question.choice", choice, 1024)?;
         }
@@ -1073,6 +1093,9 @@ fn answer_question_core(
         .iter_mut()
         .find(|question| question.id == question_id)
         .ok_or_else(|| "question_not_found".to_string())?;
+    if question.kind != TodoKind::Question {
+        return Err("todo_is_not_question".into());
+    }
     if question.state != QuestionState::Open {
         return Err("question_not_open".into());
     }
@@ -1102,6 +1125,73 @@ fn answer_question_core(
         });
     }
     emit_presentation_updated(&state, &task_id, Some("human"), Some("answer_question"));
+    Ok(document)
+}
+
+#[tauri::command]
+fn complete_todo(
+    state: tauri::State<'_, Arc<AppState>>,
+    task_id: String,
+    todo_id: String,
+) -> Result<PresentationDocument, String> {
+    complete_todo_core(&state, task_id, todo_id)
+}
+
+fn complete_todo_core(
+    state: &AppState,
+    task_id: String,
+    todo_id: String,
+) -> Result<PresentationDocument, String> {
+    validate_id(&task_id)?;
+    validate_id(&todo_id)?;
+    let mut connection = state.db.lock().map_err(display_error)?;
+    let transaction = connection.transaction().map_err(display_error)?;
+    let document_json: String = transaction
+        .query_row(
+            "SELECT document_json FROM tasks WHERE id = ?1",
+            [&task_id],
+            |row| row.get(0),
+        )
+        .map_err(display_error)?;
+    let mut document: PresentationDocument =
+        serde_json::from_str(&document_json).map_err(display_error)?;
+    let todo = document
+        .questions
+        .iter_mut()
+        .find(|todo| todo.id == todo_id)
+        .ok_or_else(|| "todo_not_found".to_string())?;
+    if todo.kind != TodoKind::Action {
+        return Err("todo_is_not_action".into());
+    }
+    if todo.state != QuestionState::Open {
+        return Err("todo_not_open".into());
+    }
+    todo.answer = None;
+    todo.state = QuestionState::Completed;
+    document.revision += 1;
+    document.updated_at = now();
+    transaction
+        .execute(
+            "UPDATE tasks SET document_json = ?1, updated_at = ?2 WHERE id = ?3",
+            params![
+                serde_json::to_string(&document).map_err(display_error)?,
+                document.updated_at,
+                task_id
+            ],
+        )
+        .map_err(display_error)?;
+    transaction.commit().map_err(display_error)?;
+    drop(connection);
+
+    let key = waiter_key(&task_id, &todo_id);
+    if let Some(waiter) = state.waiters.lock().map_err(display_error)?.remove(&key) {
+        let _ = waiter.send(WaitResult {
+            status: "completed".into(),
+            answer: None,
+            question_id: todo_id,
+        });
+    }
+    emit_presentation_updated(&state, &task_id, Some("human"), Some("complete_todo"));
     Ok(document)
 }
 
@@ -2724,6 +2814,7 @@ pub fn run() {
             get_document,
             apply_operation,
             answer_question,
+            complete_todo,
             update_layout,
             get_scratchpad,
             update_scratchpad,
@@ -3165,6 +3256,59 @@ mod tests {
         assert_eq!(
             answer_question_core(&state, task.id, "rollout".into(), "Again".into()).unwrap_err(),
             "question_not_open"
+        );
+    }
+
+    #[test]
+    fn action_todos_are_completed_by_the_human() {
+        let state = AppState::in_memory();
+        let task = create_task_core(&state, None).unwrap();
+        let document = apply_operation_core(
+            &state,
+            operation(
+                &task.id,
+                "ask_user",
+                json!({
+                    "id": "deploy",
+                    "kind": "action",
+                    "text": "Deploy the release to production.",
+                    "blocking": true,
+                    "choices": [],
+                    "allow_free_text": false
+                }),
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(document.questions[0].kind, TodoKind::Action);
+        assert_eq!(document.questions[0].state, QuestionState::Open);
+        assert!(has_attention(&document));
+        assert_eq!(
+            answer_question_core(
+                &state,
+                task.id.clone(),
+                "deploy".into(),
+                "Done".into()
+            )
+            .unwrap_err(),
+            "todo_is_not_question"
+        );
+
+        let (sender, receiver) = oneshot::channel();
+        state
+            .waiters
+            .lock()
+            .unwrap()
+            .insert(waiter_key(&task.id, "deploy"), sender);
+        let document = complete_todo_core(&state, task.id.clone(), "deploy".into()).unwrap();
+        assert_eq!(document.questions[0].state, QuestionState::Completed);
+        assert!(!has_attention(&document));
+        let wait = receiver.blocking_recv().unwrap();
+        assert_eq!(wait.status, "completed");
+        assert_eq!(wait.answer, None);
+        assert_eq!(
+            complete_todo_core(&state, task.id, "deploy".into()).unwrap_err(),
+            "todo_not_open"
         );
     }
 }

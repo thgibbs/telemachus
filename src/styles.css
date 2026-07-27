@@ -840,6 +840,18 @@ button:disabled {
   box-shadow: inset 3px 0 0 var(--orange);
 }
 
+.question-card.todo-action:not(.blocking) {
+  border-color: #3d4963;
+}
+
+.question-card.todo-action:not(.blocking) .question-kicker {
+  color: var(--blue);
+}
+
+.question-card.todo-action .button {
+  width: 100%;
+}
+
 .question-card.answered {
   opacity: 0.65;
 }

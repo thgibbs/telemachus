@@ -14,7 +14,13 @@ export type ItemStatus =
   | "blocked"
   | "skipped";
 
-export type QuestionState = "open" | "answered" | "timed_out" | "cancelled";
+export type QuestionState =
+  | "open"
+  | "answered"
+  | "completed"
+  | "timed_out"
+  | "cancelled";
+export type TodoKind = "question" | "action";
 export type AlertSeverity = "info" | "warning" | "critical";
 export type AlertState = "active" | "acknowledged" | "cleared";
 export type ResourceStatus =
@@ -41,8 +47,9 @@ export interface PresentedTask {
   order: number;
 }
 
-export interface Question {
+export interface TodoItem {
   id: string;
+  kind: TodoKind;
   text: string;
   blocking: boolean;
   choices: string[];
@@ -51,6 +58,8 @@ export interface Question {
   state: QuestionState;
   created_at: string;
 }
+
+export type Question = TodoItem;
 
 export interface SummarySection {
   id: string;
@@ -93,7 +102,7 @@ export interface PresentationDocument {
   updated_at: string;
   header: TaskHeader;
   tasks: PresentedTask[];
-  questions: Question[];
+  questions: TodoItem[];
   summary: TaskSummary;
   alerts: Alert[];
   resources: Resource[];

@@ -99,7 +99,7 @@ const tools = [
   },
   {
     name: "ask_user",
-    description: "Show a question in Agent UI and optionally wait for its answer.",
+    description: "Add a question to the human To do pane and optionally wait for its answer.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -116,7 +116,33 @@ const tools = [
   },
   {
     name: "get_question",
-    description: "Read a question and its current answer from task context.",
+    description: "Read a question and its current answer from the human To do pane.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["id"],
+      properties: { id: { type: "string" } },
+    },
+  },
+  {
+    name: "add_todo",
+    description:
+      "Add an action the human needs to complete, such as deploying, merging, or reviewing.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["id", "text"],
+      properties: {
+        id: { type: "string" },
+        text: { type: "string" },
+        blocking: { type: "boolean", default: false },
+        wait_seconds: { type: "integer", minimum: 0, maximum: 3600, default: 300 },
+      },
+    },
+  },
+  {
+    name: "get_todo",
+    description: "Read any action or question from the human To do pane.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -200,23 +226,51 @@ async function callTool(name, input = {}) {
   if (name === "get_task_context") {
     return (await request("/v1/context")).document;
   }
-  if (name === "get_question") {
+  if (name === "get_question" || name === "get_todo") {
     const document = (await request("/v1/context")).document;
-    return document.questions.find((question) => question.id === input.id) ?? null;
+    const todo =
+      document.questions.find((question) => question.id === input.id) ?? null;
+    if (name === "get_question" && (todo?.kind ?? "question") !== "question") {
+      return null;
+    }
+    return todo ? { kind: "question", ...todo } : null;
   }
-  const waitSeconds = name === "ask_user" ? input.wait_seconds ?? 300 : undefined;
+  const isQuestion = name === "ask_user";
+  const isAction = name === "add_todo";
+  const blocking = isQuestion
+    ? input.blocking ?? true
+    : isAction
+      ? input.blocking ?? false
+      : false;
+  const waitSeconds =
+    (isQuestion || isAction) && blocking
+      ? input.wait_seconds ?? 300
+      : undefined;
   const payload =
-    name === "ask_user"
+    isQuestion
       ? {
           id: input.id,
+          kind: "question",
           text: input.text,
-          blocking: input.blocking ?? true,
+          blocking,
           choices: input.choices ?? [],
           allow_free_text: input.allow_free_text ?? true,
           answer: null,
           state: "open",
           created_at: new Date().toISOString(),
         }
+      : isAction
+        ? {
+            id: input.id,
+            kind: "action",
+            text: input.text,
+            blocking,
+            choices: [],
+            allow_free_text: false,
+            answer: null,
+            state: "open",
+            created_at: new Date().toISOString(),
+          }
       : name === "raise_alert"
         ? { state: "active", message: "", ...input }
         : input;
@@ -227,7 +281,7 @@ async function callTool(name, input = {}) {
         protocol_version: protocolVersion,
         task_id: taskId,
         source: "agent-ui-mcp",
-        op_type: name,
+        op_type: isAction ? "ask_user" : name,
         payload,
         idempotency_key: randomUUID(),
       },

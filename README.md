@@ -2,9 +2,9 @@
 
 A local, task-focused terminal workspace for Codex, Claude, shell scripts, and
 ordinary command-line work. Each task keeps a real interactive terminal beside
-durable plan, artifact, question, summary, and alert panels, plus a private
+durable plan, artifact, human todo, summary, and alert panels, plus a private
 human scratchpad. Alerts appear only while active at the top of the left
-sidebar. The agent summary appears beneath Questions as a Status accordion,
+sidebar. The agent summary appears beneath To do as a Status accordion,
 automatically expands when updated, and can be collapsed to its headline.
 
 ## Prerequisites
@@ -52,7 +52,7 @@ Launch the agent inside a Telemachus terminal and include a short instruction
 such as:
 
 > Keep this task's Telemachus screen current with the `agent-ui` command. Update
-> task status, plan items, artifacts, summary, alerts, and questions
+> task status, plan items, artifacts, summary, alerts, and human to dos
 > as useful.
 > Run `agent-ui help` for the command reference.
 
@@ -86,7 +86,9 @@ agent-ui artifact add pr "Checkout fix PR" \
   https://github.com/acme/store/pull/42 --type github_pr \
   --meta github_state=open
 
-agent-ui question ask rollout "Which rollout should we use?" \
+agent-ui todo add deploy "Deploy the release to production"
+
+agent-ui todo ask rollout "Which rollout should we use?" \
   --choice Canary --choice "All at once" --timeout 300
 ```
 
@@ -161,8 +163,8 @@ JSON
 ```
 
 `publish` applies revision-checked typed operations in order. It intentionally
-does not alter questions, because replacing a pending human decision could lose
-an answer.
+does not alter human to dos, because replacing pending work or a pending
+decision could lose human input.
 
 ## Task-scoped environment
 
@@ -210,9 +212,9 @@ The display-settings menu in the title bar also provides persistent Standard,
 Large, and Extra large text sizes. This scales both application text and the
 embedded terminal.
 
-Agent-originated changes briefly highlight the affected task header, Questions,
+Agent-originated changes briefly highlight the affected task header, To do,
 Plan, Artifacts, Status, or Alerts section. Human actions such as answering a
-question or clearing an alert do not trigger that highlight.
+question, completing a todo, or clearing an alert do not trigger that highlight.
 
 For development outside a Telemachus terminal, `npm link` exposes the same
 `agent-ui` command globally, but write commands still require the task-scoped
@@ -227,7 +229,7 @@ operation service as the CLI.
 
 ## Security boundary
 
-The bridge contains typed task, presentation, question, layout, and
+The bridge contains typed task, presentation, human-todo, layout, and
 terminal-session operations. It does not expose generic file reads/writes,
 arbitrary execution, Git, GitHub, repository, or credential APIs.
 

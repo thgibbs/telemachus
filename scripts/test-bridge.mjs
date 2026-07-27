@@ -324,7 +324,34 @@ await run("bin/agent-ui.mjs", ["artifact", "clear"]);
 assert.equal(document.resources.length, 0);
 
 await run("bin/agent-ui.mjs", [
-  "question",
+  "todo",
+  "add",
+  "deploy",
+  "Deploy the release to production",
+]);
+const actionTodo = await run("bin/agent-ui.mjs", [
+  "todo",
+  "get",
+  "deploy",
+  "--compact",
+]);
+assert.equal(JSON.parse(actionTodo.stdout).kind, "action");
+const actionTodos = await run("bin/agent-ui.mjs", [
+  "todo",
+  "list",
+  "--kind",
+  "action",
+  "--state",
+  "open",
+  "--compact",
+]);
+assert.deepEqual(
+  JSON.parse(actionTodos.stdout).map((todo) => todo.id),
+  ["deploy"],
+);
+
+await run("bin/agent-ui.mjs", [
+  "todo",
   "ask",
   "rollout",
   "Which rollout?",
@@ -341,6 +368,16 @@ const question = await run("bin/agent-ui.mjs", [
   "--compact",
 ]);
 assert.equal(JSON.parse(question.stdout).state, "open");
+assert.equal(JSON.parse(question.stdout).kind, "question");
+const legacyQuestionList = await run("bin/agent-ui.mjs", [
+  "question",
+  "list",
+  "--compact",
+]);
+assert.deepEqual(
+  JSON.parse(legacyQuestionList.stdout).map((todo) => todo.id),
+  ["rollout"],
+);
 
 await run(
   "bin/agent-ui.mjs",
@@ -442,6 +479,18 @@ const mcp = await run(
       method: "tools/call",
       params: { name: "get_task_context", arguments: {} },
     }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: {
+        name: "add_todo",
+        arguments: {
+          id: "mcp-review",
+          text: "Review the MCP-generated artifact",
+        },
+      },
+    }),
   ].join("\n") + "\n",
 );
 const responses = mcp.stdout
@@ -449,12 +498,23 @@ const responses = mcp.stdout
   .split("\n")
   .map((line) => JSON.parse(line));
 assert.equal(responses[0].result.serverInfo.name, "agent-ui");
-assert.equal(responses[1].result.tools.length, 11);
+assert.equal(responses[1].result.tools.length, 13);
 assert.equal(responses[2].result.structuredContent.protocol_version, "1.0");
+assert.equal(
+  responses[3].result.structuredContent.questions.find(
+    (todo) => todo.id === "mcp-review",
+  ).kind,
+  "action",
+);
 
 assert.ok(operations.every((operation) => operation.task_id === taskId));
 assert.ok(operations.every((operation) => operation.idempotency_key));
-assert.ok(operations.every((operation) => operation.source === "bridge-test"));
+assert.ok(
+  operations.every((operation) =>
+    ["bridge-test", "agent-ui-mcp"].includes(operation.source),
+  ),
+);
+assert.equal(operations.at(-1).source, "agent-ui-mcp");
 
 server.close();
 await once(server, "close");

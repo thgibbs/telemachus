@@ -33,7 +33,7 @@ scroll gracefully — it crowds out the rest of the screen.
 
 - **Plan item:** a title plus one brief line. No paragraphs, no nested detail.
 - **Status message:** a short phrase, not a sentence.
-- **Alert and question:** one line of context. The reasoning belongs in the conversation.
+- **Alert and todo:** one line of context. The reasoning belongs in the conversation.
 - **Summary section:** one line each.
 
 Say the thing that changes what the human does, and stop. If it takes a paragraph, it
@@ -48,25 +48,26 @@ Keep the screen useful throughout the task:
 3. Update plan items as work progresses.
 4. Report important risks as alerts.
 5. Add produced documents and pull requests as artifacts.
-6. Ask a question whenever you need a decision or an answer from the human.
+6. Add a todo whenever the human owes an action, decision, or answer.
 7. Finish with a concise summary and final task status.
 
-## Alerts vs. questions
+## Alerts vs. human to dos
 
-The two are not interchangeable. The test is whether the human has to reply.
+The two are not interchangeable. The test is whether the human owes something.
 
 - **Alert = you are telling them something.** Findings, risks, surprises, caveats they
   should know about. Read and move on. Nothing is waiting on them.
-- **Question = you need something back.** A decision, an approval, a preference, a fact
-  only they have. Work is either blocked on the answer or will be shaped by it.
+- **Todo = the human needs to act or answer.** Deploying, merging, reviewing, approving,
+  choosing, or supplying a fact all belong in the To do pane.
 
 Never put a decision request in an alert. "Needs your sign-off", "which of these should
-I do", "confirm before I proceed" — all of those belong in `question ask`, even when a
-plain-text message in the conversation also asks. The questions slot is where the human
-looks for what they owe you; an alert phrased as a question just gets read and forgotten.
+I do", "confirm before I proceed" — all of those belong in `todo add` or `todo ask`,
+even when a plain-text message in the conversation also asks. The To do pane is where
+the human looks for what they owe you; an alert phrased as a request just gets read and
+forgotten.
 
-The reverse holds too: do not raise a question for something that needs no answer. An
-observation with no decision attached is an alert.
+The reverse holds too: do not add a todo for something that needs no human response or
+action. An observation with no decision attached is an alert.
 
 Do not create a new ID every time an item changes. Reuse stable IDs such as
 `inspect`, `implement`, `verify`, `security-risk`, and `release-pr`.
@@ -198,12 +199,12 @@ agent-ui summary set --headline "Investigation complete" --body-file summary.md
 ## Alerts
 
 Use alerts for actionable risks, blockers, and important exceptions — things the human
-should **know**. If the item needs a reply, it is a question, not an alert.
+should **know**. If the item needs a reply or human action, it is a todo, not an alert.
 
 ```bash
-agent-ui alert raise deployment-risk "Deployment approval required" \
+agent-ui alert raise migration-lock "Migration may block writes" \
   --severity warning \
-  --message "The code is ready, but production deployment needs approval."
+  --message "The exclusive lock may pause checkout writes for up to 30 seconds."
 ```
 
 Severities are `info`, `warning`, and `critical`.
@@ -211,12 +212,12 @@ Severities are `info`, `warning`, and `critical`.
 Update or clear an alert using the same ID:
 
 ```bash
-agent-ui alert upsert deployment-risk \
-  --title "Deployment approved" \
+agent-ui alert upsert migration-lock \
+  --title "Migration lock risk mitigated" \
   --severity info \
-  --message "Release may proceed."
+  --message "The concurrent index path avoids the exclusive lock."
 
-agent-ui alert clear deployment-risk
+agent-ui alert clear migration-lock
 ```
 
 ## Artifacts
@@ -313,16 +314,34 @@ Artifact statuses:
 `agent-ui resource ...` is accepted only as a backward-compatible alias for
 older instructions; it updates this same Artifacts collection.
 
-## Questions
+## Human to dos
 
-Anything that needs a decision or an answer from the human goes here — scope calls,
-approvals, preferences, facts only they have. Choose blocking or non-blocking by whether
-work can continue meanwhile, not by how important the answer is.
+Anything the human needs to do goes here: deploy, merge, review, approve, make a scope
+call, express a preference, or provide a fact only they have.
+
+Add an action when the human needs to perform work:
+
+```bash
+agent-ui todo add deploy "Deploy the release to production"
+agent-ui todo add merge "Merge PR #42 after checks pass"
+agent-ui todo list --kind action --state open
+```
+
+Actions return immediately by default. Add `--blocking` only when no useful agent work
+can continue until the human marks the action done:
+
+```bash
+agent-ui todo add review "Review the production migration plan" \
+  --blocking --timeout 300
+```
+
+Use a question when the human needs to answer. Choose blocking or non-blocking by
+whether work can continue meanwhile, not by how important the answer is.
 
 Ask a blocking question when work cannot continue without an answer:
 
 ```bash
-agent-ui question ask rollout "Which rollout should we use?" \
+agent-ui todo ask rollout "Which rollout should we use?" \
   --choice Canary \
   --choice "All at once" \
   --timeout 300
@@ -334,9 +353,9 @@ out or is cancelled.
 Create a non-blocking question when other work can continue:
 
 ```bash
-agent-ui question ask naming "Which name do you prefer?" --non-blocking
-agent-ui question get naming
-agent-ui question list --state open
+agent-ui todo ask naming "Which name do you prefer?" --non-blocking
+agent-ui todo get naming
+agent-ui todo list --kind question --state open
 ```
 
 Create a non-blocking question when the answer shapes later work but there is still
@@ -344,6 +363,9 @@ useful work to do now — a scope call on a plan you have already delivered, for
 
 Do not use a question as a substitute for making a safe, reversible engineering
 decision.
+
+`agent-ui question list|get|ask` remains available for compatibility, but new
+instructions should use the unified `todo` command.
 
 ## Publish a complete screen
 
@@ -396,7 +418,7 @@ JSON
 ```
 
 Omitted sections stay unchanged. An included empty collection clears that
-collection. `publish` does not replace questions.
+collection. `publish` does not replace human to dos.
 
 ## Machine-readable output
 
@@ -443,7 +465,7 @@ Do not reuse an idempotency key for a different payload.
 | 0 | Success |
 | 1 | Rejected input or missing presentation item |
 | 2 | Retryable revision conflict |
-| 3 | Question timed out or was cancelled |
+| 3 | Blocking todo timed out or was cancelled |
 | 4 | Missing task context, bridge unavailable, or authentication failure |
 | 64 | Invalid command usage |
 

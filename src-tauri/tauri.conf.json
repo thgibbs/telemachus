@@ -36,6 +36,6 @@
     "active": false,
     "targets": "all",
     "shortDescription": "Task-focused terminal workspace for agent CLIs",
-    "longDescription": "A local terminal workspace with persistent task context, plans, questions, summaries, alerts, and resources."
+    "longDescription": "A local terminal workspace with persistent task context, plans, human to dos, summaries, alerts, and resources."
   }
 }

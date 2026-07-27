@@ -140,9 +140,13 @@ function applyBrowserOperation(
         Pick<Question, "id" | "text">;
       const question: Question = {
         id: incoming.id,
+        kind: incoming.kind ?? "question",
         text: incoming.text,
-        choices: incoming.choices ?? [],
-        allow_free_text: incoming.allow_free_text ?? true,
+        choices: incoming.kind === "action" ? [] : (incoming.choices ?? []),
+        allow_free_text:
+          incoming.kind === "action"
+            ? false
+            : (incoming.allow_free_text ?? true),
         blocking: incoming.blocking ?? true,
         answer: incoming.answer ?? null,
         state: incoming.state ?? "open",
@@ -241,6 +245,34 @@ export async function answerQuestion(
         task_id: taskId,
         source: "human",
         op_type: "answer_question",
+      },
+    }),
+  );
+  return next;
+}
+
+export async function completeTodo(
+  taskId: string,
+  todoId: string,
+): Promise<PresentationDocument> {
+  if (isTauri()) return invoke("complete_todo", { taskId, todoId });
+  const docs = readBrowserDocs();
+  const next = structuredClone(docs[taskId] ?? emptyDocument(taskId));
+  next.questions = next.questions.map((todo) =>
+    todo.id === todoId
+      ? { ...todo, answer: null, state: "completed" as const }
+      : todo,
+  );
+  next.revision += 1;
+  next.updated_at = new Date().toISOString();
+  docs[taskId] = next;
+  storeBrowserDocs(docs);
+  window.dispatchEvent(
+    new CustomEvent("browser-presentation-updated", {
+      detail: {
+        task_id: taskId,
+        source: "human",
+        op_type: "complete_todo",
       },
     }),
   );

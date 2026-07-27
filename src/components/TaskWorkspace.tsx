@@ -17,7 +17,7 @@ import {
   GitPullRequest,
   Globe2,
   Info,
-  MessageCircleQuestion,
+  ListTodo,
   PanelLeftClose,
   Paperclip,
   Save,
@@ -39,13 +39,14 @@ import { statusLabel } from "../types";
 import {
   answerQuestion,
   applyOperation,
+  completeTodo,
   getBridgeInfo,
   getClosedGithubPullRequests,
   openArtifact,
   updateLayout,
 } from "../lib/platform";
 import { Markdown } from "./Markdown";
-import { QuestionCard } from "./QuestionCard";
+import { TodoCard } from "./TodoCard";
 import { Scratchpad } from "./Scratchpad";
 import { TerminalPane } from "./TerminalPane";
 
@@ -177,7 +178,7 @@ export function TaskWorkspace({
     at: number;
     section:
       | "header"
-      | "questions"
+      | "todos"
       | "plan"
       | "artifacts"
       | "summary"
@@ -283,7 +284,7 @@ export function TaskWorkspace({
     onTaskChanged();
   }
 
-  const openQuestions = document.questions.filter((q) => q.state === "open");
+  const openTodos = document.questions.filter((todo) => todo.state === "open");
   const activeAlerts = document.alerts.filter((a) => a.state !== "cleared");
   const statusHeadline = document.summary.headline || "No status yet";
   const issueUrl = document.header.issue_url ?? "";
@@ -435,28 +436,33 @@ export function TaskWorkspace({
                 <div className="section-divider" />
               </>
             )}
-            {openQuestions.length > 0 && (
+            {openTodos.length > 0 && (
               <>
                 <section
                   className="presentation-section"
-                  data-agent-section="questions"
+                  data-agent-section="todos"
                 >
                   <PanelHeading
-                    icon={<MessageCircleQuestion size={15} />}
-                    title="Questions"
-                    count={openQuestions.length}
+                    icon={<ListTodo size={15} />}
+                    title="To do"
+                    count={openTodos.length}
                   />
                   <div className="question-list">
-                    {openQuestions.map((question) => (
-                      <QuestionCard
-                        key={question.id}
-                        question={question}
+                    {openTodos.map((todo) => (
+                      <TodoCard
+                        key={todo.id}
+                        todo={todo}
                         onAnswer={async (answer) => {
                           const next = await answerQuestion(
                             task.id,
-                            question.id,
+                            todo.id,
                             answer,
                           );
+                          onDocument(next);
+                          onTaskChanged();
+                        }}
+                        onComplete={async () => {
+                          const next = await completeTodo(task.id, todo.id);
                           onDocument(next);
                           onTaskChanged();
                         }}
@@ -1232,7 +1238,7 @@ function IntegrationDialog({
         </div>
         <p className="muted">
           Use <code>agent-ui help</code> for task, plan, summary, alert, artifact,
-          question, and whole-screen commands. MCP setup is not required.
+          todo, question, and whole-screen commands. MCP setup is not required.
         </p>
         <details>
           <summary>Connection diagnostic</summary>
