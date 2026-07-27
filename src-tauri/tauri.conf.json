@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Telemachus",
+  "version": "0.1.0",
+  "identifier": "com.agentui.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    },
+    "windows": [
+      {
+        "label": "main",
+        "title": "Telemachus",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 820,
+        "minHeight": 560,
+        "center": true,
+        "decorations": true,
+        "hiddenTitle": true,
+        "titleBarStyle": "Overlay",
+        "trafficLightPosition": {
+          "x": 18,
+          "y": 17
+        }
+      }
+    ]
+  },
+  "bundle": {
+    "active": false,
+    "targets": "all",
+    "shortDescription": "Task-focused terminal workspace for agent CLIs",
+    "longDescription": "A local terminal workspace with persistent task context, plans, questions, summaries, alerts, and resources."
+  }
+}
