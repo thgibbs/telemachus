@@ -95,6 +95,12 @@ button:disabled {
   min-width: 0;
   background: #141519;
   border-bottom: 1px solid var(--line);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.app-chrome * {
+  -webkit-user-select: none;
   user-select: none;
 }
 

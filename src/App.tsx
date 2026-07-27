@@ -365,7 +365,7 @@ export function App() {
 
   return (
     <div className="app-shell" data-text-size={textSize}>
-      <header className="app-chrome" data-tauri-drag-region>
+      <header className="app-chrome" data-tauri-drag-region="deep">
         <div className="traffic-light-space" data-tauri-drag-region />
         <div className="brand" data-tauri-drag-region>
           <div className="brand-mark">
