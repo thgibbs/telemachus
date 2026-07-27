@@ -12,7 +12,6 @@ import {
   Copy,
   Edit3,
   ExternalLink,
-  FileCode2,
   FileText,
   GitPullRequest,
   Globe2,
@@ -41,7 +40,6 @@ import {
   applyOperation,
   completeTodo,
   discoverOpenGithubPullRequests,
-  getBridgeInfo,
   getClosedGithubPullRequests,
   openArtifact,
   updateLayout,
@@ -189,7 +187,6 @@ export function TaskWorkspace({
 }) {
   const [layout, setLayout] = useState(task.layout);
   const [editingHeader, setEditingHeader] = useState(false);
-  const [showIntegration, setShowIntegration] = useState(false);
   const [statusExpanded, setStatusExpanded] = useState(true);
   const [reviewingArtifacts, setReviewingArtifacts] = useState(false);
   const [reviewingPullRequests, setReviewingPullRequests] = useState(false);
@@ -855,12 +852,6 @@ export function TaskWorkspace({
               </div>
               <div className="header-actions">
                 <button
-                  className="button ghost compact"
-                  onClick={() => setShowIntegration(true)}
-                >
-                  <FileCode2 size={14} /> Connect
-                </button>
-                <button
                   className="icon-button bordered"
                   aria-label="Edit task header"
                   onClick={() => setEditingHeader(true)}
@@ -882,10 +873,6 @@ export function TaskWorkspace({
       </div>
 
       <Scratchpad taskId={task.id} />
-
-      {showIntegration && (
-        <IntegrationDialog taskId={task.id} onClose={() => setShowIntegration(false)} />
-      )}
     </div>
   );
 }
@@ -1237,70 +1224,4 @@ function UpdatedAt({ value }: { value: string }) {
       : date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   }, [value]);
   return <small className="updated-at">Updated {label}</small>;
-}
-
-function IntegrationDialog({
-  taskId,
-  onClose,
-}: {
-  taskId: string;
-  onClose: () => void;
-}) {
-  const [command, setCommand] = useState("Loading task-scoped bridge…");
-  useEffect(() => {
-    getBridgeInfo(taskId)
-      .then(
-        (info) =>
-          setCommand(
-            `Task ${taskId} · ${info.endpoint} · run: agent-ui doctor`,
-          ),
-      )
-      .catch((error) => setCommand(`Bridge unavailable: ${String(error)}`));
-  }, [taskId]);
-  return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
-      <section
-        className="dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="integration-title"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="dialog-header">
-          <div>
-            <span className="dialog-kicker">Presentation bridge</span>
-            <h2 id="integration-title">Connect an agent or script</h2>
-          </div>
-          <button className="icon-button" aria-label="Close" onClick={onClose}>
-            <X size={17} />
-          </button>
-        </div>
-        <p>
-          Claude, Codex, and scripts can update this screen directly from the
-          terminal. The task-scoped command and credentials are already available:
-        </p>
-        <div className="code-copy">
-          <code>agent-ui demo</code>
-          <button
-            className="icon-button"
-            aria-label="Copy demo command"
-            onClick={() => navigator.clipboard.writeText("agent-ui demo")}
-          >
-            <Copy size={14} />
-          </button>
-        </div>
-        <p className="muted">
-          Use <code>agent-ui help</code> for task, plan, summary, alert, artifact,
-          todo, question, and whole-screen commands. MCP setup is not required.
-        </p>
-        <details>
-          <summary>Connection diagnostic</summary>
-          <code className="diagnostic">{command}</code>
-        </details>
-        <button className="button primary" onClick={onClose}>
-          Done
-        </button>
-      </section>
-    </div>
-  );
 }
