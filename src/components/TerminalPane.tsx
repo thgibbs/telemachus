@@ -27,32 +27,12 @@ export function TerminalPane({
   const activeRef = useRef(active);
   const inputArmedRef = useRef(false);
   const recoveryArmedRef = useRef(false);
-  const activityTimerRef = useRef<number | null>(null);
-  const [phase, setPhase] = useState<"starting" | "ready" | "exited" | "error">(
-    "starting",
-  );
-  const [errorMessage, setErrorMessage] = useState("");
-  const [activity, setActivity] = useState("");
   const [legacyHost, setLegacyHost] = useState(false);
   const [recovering, setRecovering] = useState(false);
   activeRef.current = active;
 
   const reportError = (error: unknown) => {
-    const message = error instanceof Error ? error.message : String(error);
     console.error("Telemachus terminal error", error);
-    setErrorMessage(message);
-    setPhase("error");
-  };
-
-  const pulseActivity = (next: string) => {
-    if (activityTimerRef.current !== null) {
-      window.clearTimeout(activityTimerRef.current);
-    }
-    setActivity(next);
-    activityTimerRef.current = window.setTimeout(() => {
-      setActivity("");
-      activityTimerRef.current = null;
-    }, 1400);
   };
 
   useEffect(() => {
@@ -150,9 +130,7 @@ export function TerminalPane({
       if (!bytes) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      writeTerminal(sessionRef.current, bytes)
-        .then(() => pulseActivity("input sent"))
-        .catch(reportError);
+      writeTerminal(sessionRef.current, bytes).catch(reportError);
     };
     const paste = (event: ClipboardEvent) => {
       if (
@@ -169,9 +147,7 @@ export function TerminalPane({
       writeTerminal(
         sessionRef.current,
         Array.from(new TextEncoder().encode(value)),
-      )
-        .then(() => pulseActivity("input sent"))
-        .catch(reportError);
+      ).catch(reportError);
     };
     window.addEventListener("pointerdown", pointerDown, true);
     window.addEventListener("keydown", keyDown, true);
@@ -241,9 +217,6 @@ export function TerminalPane({
         );
         setRecovering(false);
         setLegacyHost(true);
-        setErrorMessage("");
-        setPhase("ready");
-        pulseActivity("recovered");
         return;
       }
       if (
@@ -262,9 +235,6 @@ export function TerminalPane({
         );
         setRecovering(false);
         setLegacyHost(true);
-        setErrorMessage("");
-        setPhase("ready");
-        pulseActivity("recovered");
         return;
       }
       if (!sessionRef.current) {
@@ -277,7 +247,6 @@ export function TerminalPane({
         pendingOutput.push(payload);
         return;
       }
-      pulseActivity("output");
       terminal.write(new Uint8Array(payload.data));
     });
     outputListenerReady.then((cleanup) => {
@@ -324,8 +293,6 @@ export function TerminalPane({
             });
           attached = true;
           pendingOutput.length = 0;
-          setErrorMessage("");
-          setPhase("ready");
           requestAnimationFrame(() => {
             fitAndResize();
             if (activeRef.current) {
@@ -350,10 +317,6 @@ export function TerminalPane({
       window.removeEventListener("pointerdown", pointerDown, true);
       window.removeEventListener("keydown", keyDown, true);
       window.removeEventListener("paste", paste, true);
-      if (activityTimerRef.current !== null) {
-        window.clearTimeout(activityTimerRef.current);
-        activityTimerRef.current = null;
-      }
       dataDisposable.dispose();
       unlisten?.();
       terminal.dispose();
@@ -380,12 +343,6 @@ export function TerminalPane({
           <TerminalSquare size={13} />
           Terminal
         </span>
-        <span
-          className={`terminal-phase ${phase}`}
-          title={errorMessage || undefined}
-        >
-          {errorMessage || activity || phase}
-        </span>
         {legacyHost && (
           <button
             className="terminal-recover"
@@ -394,7 +351,6 @@ export function TerminalPane({
             onClick={() => {
               recoveryArmedRef.current = true;
               setRecovering(true);
-              pulseActivity("listening");
             }}
           >
             {recovering ? "Listening…" : "Recover original"}
