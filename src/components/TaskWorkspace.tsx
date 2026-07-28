@@ -180,6 +180,8 @@ export function TaskWorkspace({
       | "todos"
       | "plan"
       | "artifacts"
+      | "prs"
+      | "resources"
       | "summary"
       | "alerts";
   };
@@ -663,8 +665,11 @@ export function TaskWorkspace({
             </section>
 
             <div className="section-divider" />
-            <div className="artifact-sections" data-agent-section="artifacts">
-              <section className="presentation-section">
+            <div className="artifact-sections" data-agent-section="resources">
+              <section
+                className="presentation-section"
+                data-agent-section="artifacts"
+              >
                 <PanelHeading
                   icon={<Paperclip size={15} />}
                   title="Artifacts"
@@ -750,7 +755,10 @@ export function TaskWorkspace({
               </section>
 
               <div className="section-divider" />
-              <section className="presentation-section">
+              <section
+                className="presentation-section"
+                data-agent-section="prs"
+              >
                 <PanelHeading
                   icon={<GitPullRequest size={15} />}
                   title="PRs"

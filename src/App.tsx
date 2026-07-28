@@ -38,6 +38,8 @@ type PresentationSection =
   | "todos"
   | "plan"
   | "artifacts"
+  | "prs"
+  | "resources"
   | "summary"
   | "alerts";
 
@@ -91,8 +93,11 @@ function changedSection(
     case "clear_alert":
       return "alerts";
     case "replace_resources":
+      return "resources";
     case "review_state":
-      return "artifacts";
+      if (update.section === "prs") return "prs";
+      if (update.section === "artifacts") return "artifacts";
+      return "resources";
     default:
       return null;
   }

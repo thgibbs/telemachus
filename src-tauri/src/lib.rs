@@ -1044,6 +1044,16 @@ fn emit_presentation_updated(
     source: Option<&str>,
     op_type: Option<&str>,
 ) {
+    emit_presentation_section_updated(state, task_id, source, op_type, None);
+}
+
+fn emit_presentation_section_updated(
+    state: &AppState,
+    task_id: &str,
+    source: Option<&str>,
+    op_type: Option<&str>,
+    section: Option<&str>,
+) {
     if let Ok(handle) = state.app_handle.lock() {
         if let Some(handle) = handle.as_ref() {
             let _ = handle.emit(
@@ -1052,6 +1062,7 @@ fn emit_presentation_updated(
                     "task_id": task_id,
                     "source": source,
                     "op_type": op_type,
+                    "section": section,
                 }),
             );
         }
@@ -2212,15 +2223,16 @@ fn update_source_review_state(
     let mut document: PresentationDocument =
         serde_json::from_str(&document_json).map_err(display_error)?;
     let mut changed = false;
+    let mut changed_artifacts = false;
+    let mut changed_pull_requests = false;
     for resource in &mut document.resources {
         let Some(update) = updates.get(&resource.path_or_url) else {
             continue;
         };
-        if !matches!(
-            resource.resource_type.as_str(),
-            "github_pr" | "local_document"
-        ) {
-            continue;
+        match resource.resource_type.as_str() {
+            "github_pr" => changed_pull_requests = true,
+            "local_document" => changed_artifacts = true,
+            _ => continue,
         }
         changed = true;
         resource
@@ -2271,11 +2283,17 @@ fn update_source_review_state(
         .map_err(display_error)?;
     transaction.commit().map_err(display_error)?;
     drop(connection);
-    emit_presentation_updated(
+    let section = match (changed_artifacts, changed_pull_requests) {
+        (true, false) => Some("artifacts"),
+        (false, true) => Some("prs"),
+        _ => None,
+    };
+    emit_presentation_section_updated(
         state,
         source_task_id,
         Some("agent-ui-review-launcher"),
         Some("review_state"),
+        section,
     );
     Ok(())
 }

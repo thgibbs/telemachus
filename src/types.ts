@@ -173,6 +173,7 @@ export interface PresentationUpdate {
   task_id: string;
   source?: string;
   op_type?: string;
+  section?: "artifacts" | "prs";
 }
 
 export const emptyDocument = (taskId: string): PresentationDocument => ({
