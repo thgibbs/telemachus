@@ -188,6 +188,7 @@ export function TaskWorkspace({
   const [layout, setLayout] = useState(task.layout);
   const [editingHeader, setEditingHeader] = useState(false);
   const [statusExpanded, setStatusExpanded] = useState(true);
+  const [planExpanded, setPlanExpanded] = useState(true);
   const [reviewingArtifacts, setReviewingArtifacts] = useState(false);
   const [reviewingPullRequests, setReviewingPullRequests] = useState(false);
   const [artifactReviewError, setArtifactReviewError] = useState("");
@@ -212,6 +213,21 @@ export function TaskWorkspace({
       Date.now() - presentationChange.at <= 2500
     ) {
       setStatusExpanded(true);
+    }
+  }, [
+    active,
+    presentationChange?.at,
+    presentationChange?.id,
+    presentationChange?.section,
+  ]);
+
+  useEffect(() => {
+    if (
+      active &&
+      presentationChange?.section === "plan" &&
+      Date.now() - presentationChange.at <= 2500
+    ) {
+      setPlanExpanded(true);
     }
   }, [
     active,
@@ -336,6 +352,13 @@ export function TaskWorkspace({
   const openTodos = document.questions.filter((todo) => todo.state === "open");
   const activeAlerts = document.alerts.filter((a) => a.state !== "cleared");
   const statusHeadline = document.summary.headline || "No status yet";
+  const orderedTasks = [...document.tasks].sort((a, b) => a.order - b.order);
+  const currentPlanItem =
+    orderedTasks.find((item) => item.status === "in_progress") ??
+    orderedTasks.find((item) => item.status === "blocked") ??
+    orderedTasks.find((item) => item.status === "pending") ??
+    orderedTasks.at(-1);
+  const planHeadline = currentPlanItem?.title ?? "No plan reported";
   const issueUrl = document.header.issue_url ?? "";
   const issueIdentity = githubIssueIdentity(issueUrl);
   const visibleResources = document.resources
@@ -574,44 +597,67 @@ export function TaskWorkspace({
             </section>
 
             <div className="section-divider" />
-            <section className="presentation-section" data-agent-section="plan">
-              <PanelHeading
-                icon={<ClipboardList size={15} />}
-                title="Plan"
-                count={document.tasks.length}
-              />
-              {document.tasks.length === 0 ? (
-                <EmptyState
-                  icon={<CircleDashed size={20} />}
-                  title="No plan reported"
-                  body="An agent or script can add stable task items here."
-                />
-              ) : (
-                <div className="task-list">
-                  {[...document.tasks]
-                    .sort((a, b) => a.order - b.order)
-                    .map((item) => (
-                      <div className="task-item-row" key={item.id}>
-                        <div
-                          className={`task-item status-${item.status}`}
-                          data-magnify={[
-                            item.title,
-                            item.detail,
-                            `Status: ${statusLabel[item.status]}`,
-                          ]
-                            .filter(Boolean)
-                            .join("\n")}
-                        >
-                          <span className="task-item-icon">
-                            {itemStatusIcon[item.status]}
-                          </span>
-                          <span>
-                            <strong>{item.title}</strong>
-                            {item.detail && <small>{item.detail}</small>}
-                          </span>
+            <section
+              className={`presentation-section status-accordion ${
+                planExpanded ? "expanded" : "collapsed"
+              }`}
+              data-agent-section="plan"
+            >
+              <button
+                type="button"
+                className="status-accordion-toggle"
+                aria-expanded={planExpanded}
+                aria-controls={`plan-content-${task.id}`}
+                onClick={() => setPlanExpanded((current) => !current)}
+              >
+                <span className="status-accordion-icon">
+                  <ClipboardList size={15} />
+                </span>
+                <span className="status-accordion-label">
+                  Plan
+                  <span className="status-accordion-count">
+                    {document.tasks.length}
+                  </span>
+                </span>
+                <strong data-magnify={planHeadline}>{planHeadline}</strong>
+              </button>
+              {planExpanded && (
+                <div
+                  id={`plan-content-${task.id}`}
+                  className="status-accordion-content"
+                >
+                  {document.tasks.length === 0 ? (
+                    <EmptyState
+                      icon={<CircleDashed size={20} />}
+                      title="No plan reported"
+                      body="An agent or script can add stable task items here."
+                    />
+                  ) : (
+                    <div className="task-list">
+                      {orderedTasks.map((item) => (
+                        <div className="task-item-row" key={item.id}>
+                          <div
+                            className={`task-item status-${item.status}`}
+                            data-magnify={[
+                              item.title,
+                              item.detail,
+                              `Status: ${statusLabel[item.status]}`,
+                            ]
+                              .filter(Boolean)
+                              .join("\n")}
+                          >
+                            <span className="task-item-icon">
+                              {itemStatusIcon[item.status]}
+                            </span>
+                            <span>
+                              <strong>{item.title}</strong>
+                              {item.detail && <small>{item.detail}</small>}
+                            </span>
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </section>

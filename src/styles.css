@@ -1274,11 +1274,25 @@ button:disabled {
 }
 
 .status-accordion-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   color: var(--muted);
   font-size: calc(9px * var(--text-scale));
   font-weight: 750;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.status-accordion-count {
+  min-width: 17px;
+  padding: 1px 4px;
+  border-radius: 9px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: calc(9px * var(--text-scale));
+  line-height: 1.3;
+  text-align: center;
 }
 
 .status-accordion-toggle strong {
