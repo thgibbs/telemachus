@@ -1093,13 +1093,12 @@ function ResourceCard({ resource }: { resource: Resource }) {
   return (
     <article
       className="resource-card"
-      data-magnify={`${resource.label}\n${resource.path_or_url}\n${resource.type} · ${resource.status}`}
+      data-magnify={`${resource.label}\n${resource.path_or_url}\n${resource.type}`}
     >
       <div className="resource-type">{resource.type}</div>
       <strong>{resource.label}</strong>
       <code>{resource.path_or_url}</code>
       <div className="resource-footer">
-        <span>{resource.status}</span>
         <button
           className="icon-button"
           data-magnify-ignore

@@ -1483,19 +1483,18 @@ button:disabled {
 .resource-footer {
   display: flex;
   align-items: center;
-  margin-top: 5px;
+  justify-content: flex-end;
+  height: 18px;
+  margin-top: 1px;
   color: var(--muted);
   font-size: calc(9px * var(--text-scale));
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
 
-.resource-footer > span {
-  margin-right: auto;
-}
-
 .resource-footer .icon-button {
-  margin-left: 0;
+  width: 18px;
+  height: 18px;
 }
 
 .artifact-card {
