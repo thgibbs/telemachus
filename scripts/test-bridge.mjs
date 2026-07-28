@@ -186,6 +186,11 @@ async function run(script, args = [], input = "") {
 const help = await run("bin/agent-ui.mjs", ["help"]);
 assert.match(help.stdout, /No MCP setup is required/);
 
+const instructions = await run("bin/agent-ui.mjs", ["instructions"]);
+assert.match(instructions.stdout, /^# Using Telemachus as an agent/);
+assert.match(instructions.stdout, /## Alerts vs\. human to dos/);
+assert.match(instructions.stdout, /## Recommended completion update/);
+
 const doctor = await run("bin/agent-ui.mjs", ["doctor", "--compact"]);
 assert.equal(JSON.parse(doctor.stdout).task_id, taskId);
 

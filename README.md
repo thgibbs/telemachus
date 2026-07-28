@@ -39,6 +39,7 @@ the `agent-ui` command ready to use:
 agent-ui doctor
 agent-ui demo
 agent-ui help
+agent-ui instructions
 ```
 
 No MCP server, endpoint configuration, token copy, or working-directory
@@ -54,7 +55,8 @@ such as:
 > Keep this task's Telemachus screen current with the `agent-ui` command. Update
 > task status, plan items, artifacts, summary, alerts, and human to dos
 > as useful.
-> Run `agent-ui help` for the command reference.
+> Run `agent-ui instructions` for workflow guidance and `agent-ui help` for
+> the command reference.
 
 The agent can then update each panel directly:
 
@@ -117,8 +119,8 @@ a comment on the linked issue. Each reviewed artifact records **Queued**,
 **Running**, and **Posted** states; after posting it links directly to the
 GitHub result and changes the action to **Re-review**. A run that exits without
 a newly posted result is shown as failed and can be retried.
-Give an agent [AGENT-UI-GUIDE.md](AGENT-UI-GUIDE.md) for workflow guidance, or
-see [CLI.md](CLI.md) for the complete command and JSON reference.
+Run `agent-ui instructions` for agent workflow guidance, or see
+[CLI.md](CLI.md) for the complete command and JSON reference.
 
 ## Publish the whole screen
 

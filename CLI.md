@@ -21,6 +21,15 @@ Commands emit JSON by default. Successful writes include the operation,
 task ID, resulting revision, and update timestamp. Reads return the requested
 presentation data.
 
+## Agent workflow instructions
+
+```bash
+agent-ui instructions
+```
+
+This prints the complete agent workflow guide. It does not require task or
+bridge environment variables, so it is also available when diagnosing setup.
+
 ## Global options
 
 Global options may appear anywhere in a command:
