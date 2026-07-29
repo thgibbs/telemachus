@@ -40,7 +40,7 @@ scroll gracefully — it crowds out the rest of the screen.
 - **Plan item:** a title plus one brief line. No paragraphs, no nested detail.
 - **Status message:** a short phrase, not a sentence.
 - **Alert and todo:** one line of context. The reasoning belongs in the conversation.
-- **Summary section:** one line each.
+- **Status section:** one or two lines total.
 
 Say the thing that changes what the human does, and stop. If it takes a paragraph, it
 belongs in the conversation or in an artifact, with a pointer from the screen.
@@ -53,7 +53,7 @@ Keep the screen useful throughout the task:
 2. Add a short plan with stable item IDs.
 3. Update plan items as work progresses.
 4. Report important risks as alerts.
-5. Add produced documents and pull requests as artifacts.
+5. Add directly related documents to Artifacts and outstanding pull requests to PRs.
 6. Add a todo whenever the human owes an action, decision, or answer.
 7. Finish with a concise summary and final task status.
 
@@ -176,9 +176,21 @@ Example plan JSON:
 ]
 \`\`\`
 
-## Summary
+## Status
 
-Keep summaries concise and focused on durable results:
+Status is the short handoff for where the work stands right now. Apply the coffee test:
+someone who steps away and comes back should be able to read one or two lines and
+immediately recover enough context to continue.
+
+Good status examples:
+
+- "We are code reviewing PR #123."
+- "We need to restart the server before testing."
+- "We are closing out phase 2 and about to start phase 3."
+- "I am waiting for your go-ahead to deploy."
+
+Write the Status pane with the \`summary\` command. Keep it concise and focused on
+the current handoff:
 
 \`\`\`bash
 agent-ui summary set \\
@@ -204,8 +216,16 @@ agent-ui summary set --headline "Investigation complete" --body-file summary.md
 
 ## Alerts
 
-Use alerts for actionable risks, blockers, and important exceptions — things the human
-should **know**. If the item needs a reply or human action, it is a todo, not an alert.
+Alerts are warnings or errors the human should not ignore. Use them for actionable
+risks, failures, security problems, and important exceptions. If the item needs a
+reply or human action, it is a todo, not an alert.
+
+Good alert examples:
+
+- "Do not deploy PR #123 until SQL command A has been run."
+- "The last deployment took down the production servers."
+- "A secret appeared in the transcript and must be rotated."
+- "CI failed for this release."
 
 \`\`\`bash
 agent-ui alert raise migration-lock "Migration may block writes" \\
@@ -228,7 +248,18 @@ agent-ui alert clear migration-lock
 
 ## Artifacts
 
-Artifacts appear in the left rail and have an explicit open action.
+Artifacts are documents directly related to this work. They appear in the left rail
+and have an explicit open action.
+
+Good artifacts include:
+
+- The implementation plan.
+- A design document or architecture decision.
+- A requirements document or directly relevant web page.
+- A verification report produced by the work.
+
+Do not add every file or URL encountered during investigation. Add durable references
+that help the human understand, review, or continue this task.
 
 Add a local document using an absolute path:
 
@@ -263,7 +294,13 @@ agent-ui artifact add design-spec "Design specification" \\
   --status inspected
 \`\`\`
 
-Add a GitHub pull request:
+### Pull requests
+
+PRs are outstanding pull requests for this work. Add only open PRs that the human may
+need to review, merge, monitor, or revisit as part of this task. Do not add unrelated
+PRs merely because their URLs appeared in a tool result or conversation.
+
+Add an outstanding GitHub pull request:
 
 \`\`\`bash
 agent-ui artifact add release-pr "Implementation pull request" \\
@@ -283,7 +320,7 @@ agent-ui artifact update release-pr --meta github_state=merged
 \`\`\`
 
 The human can launch Codex from an individual PR or local-document card, or
-review every open PR from the Artifacts heading. The editor runs the review in
+review every open PR from the PRs heading. The editor runs the review in
 the background with \`gpt-5.6-sol\` at high reasoning and includes this task's
 GitHub issue. Keep the task issue link current so these review actions remain
 available. Review queue, running, posted, and result-link metadata is
@@ -322,8 +359,15 @@ older instructions; it updates this same Artifacts collection.
 
 ## Human to dos
 
-Anything the human needs to do goes here: deploy, merge, review, approve, make a scope
-call, express a preference, or provide a fact only they have.
+Todos are questions and tasks for the human. Anything the human needs to answer or do
+goes here: deploy, merge, review, approve, make a scope call, express a preference, or
+provide a fact only they have.
+
+Good todo examples:
+
+- "Should I implement this for all tenants or just one?"
+- "Deploy main — we cannot proceed until it is deployed."
+- "Run SQL command A — I do not have access to production."
 
 Add an action when the human needs to perform work:
 

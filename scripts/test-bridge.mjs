@@ -188,7 +188,10 @@ assert.match(help.stdout, /No MCP setup is required/);
 
 const instructions = await run("bin/agent-ui.mjs", ["instructions"]);
 assert.match(instructions.stdout, /^# Using Telemachus as an agent/);
+assert.match(instructions.stdout, /## Status\n/);
+assert.match(instructions.stdout, /Apply the coffee test/);
 assert.match(instructions.stdout, /## Alerts vs\. human to dos/);
+assert.match(instructions.stdout, /### Pull requests/);
 assert.match(instructions.stdout, /## Recommended completion update/);
 
 const doctor = await run("bin/agent-ui.mjs", ["doctor", "--compact"]);
