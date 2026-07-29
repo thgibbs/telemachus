@@ -61,6 +61,7 @@ const taskStatuses: TaskStatus[] = [
 
 const closedGithubStates = new Set(["closed", "merged"]);
 const activeReviewStates = new Set(["queued", "running"]);
+const reviewHistoryStorageKey = "telemachus:review-history:v1";
 
 function githubIssueIdentity(value: string): string | null {
   try {
@@ -103,6 +104,45 @@ function isReportedClosedPullRequest(resource: Resource): boolean {
 
 function reportedReviewState(resource: Resource): string {
   return (resource.metadata.review_state ?? "").toLowerCase();
+}
+
+function completedReviewCount(taskId: string, resource: Resource): number {
+  if (typeof window === "undefined") return 0;
+  const historyKey = JSON.stringify([
+    taskId,
+    resource.type,
+    resource.path_or_url,
+  ]);
+  let history: Record<string, string[]> = {};
+  try {
+    const stored = JSON.parse(
+      localStorage.getItem(reviewHistoryStorageKey) ?? "{}",
+    );
+    if (stored && typeof stored === "object" && !Array.isArray(stored)) {
+      history = stored as Record<string, string[]>;
+    }
+  } catch {
+    // Ignore malformed or unavailable local storage and start fresh.
+  }
+
+  const completedIds = Array.isArray(history[historyKey])
+    ? history[historyKey].filter((value) => typeof value === "string")
+    : [];
+  const reviewId = resource.metadata.review_task_id;
+  if (
+    reportedReviewState(resource) === "posted" &&
+    reviewId &&
+    !completedIds.includes(reviewId)
+  ) {
+    completedIds.push(reviewId);
+    history[historyKey] = completedIds;
+    try {
+      localStorage.setItem(reviewHistoryStorageKey, JSON.stringify(history));
+    } catch {
+      // The current count is still usable even if persistence is unavailable.
+    }
+  }
+  return completedIds.length;
 }
 
 function isPlanDocument(resource: Resource): boolean {
@@ -731,6 +771,7 @@ export function TaskWorkspace({
                       ) ? (
                         <ArtifactCard
                           key={artifact.id}
+                          taskId={task.id}
                           resource={artifact}
                           onReview={
                             artifact.type === "local_document" && issueIdentity
@@ -817,6 +858,7 @@ export function TaskWorkspace({
                     {openPullRequests.map((pullRequest) => (
                       <ArtifactCard
                         key={pullRequest.id}
+                        taskId={task.id}
                         resource={pullRequest}
                         onReview={
                           issueIdentity
@@ -1125,10 +1167,12 @@ function ResourceCard({ resource }: { resource: Resource }) {
 }
 
 function ArtifactCard({
+  taskId,
   resource,
   onReview,
   reviewDisabledReason,
 }: {
+  taskId: string;
   resource: Resource;
   onReview?: () => Promise<void>;
   reviewDisabledReason?: string;
@@ -1139,6 +1183,9 @@ function ArtifactCard({
   const persistedReviewState = reportedReviewState(resource);
   const reviewState = reviewing ? "queued" : persistedReviewState;
   const reviewInFlight = activeReviewStates.has(reviewState);
+  const [reviewCount, setReviewCount] = useState(() =>
+    completedReviewCount(taskId, resource),
+  );
   const reviewUrl = resource.metadata.review_url ?? "";
   const reviewable = ["github_pr", "local_document"].includes(resource.type);
   const presentation = {
@@ -1158,6 +1205,16 @@ function ArtifactCard({
       openAction: "Open in browser",
     },
   }[resource.type as "local_document" | "web_document" | "github_pr"];
+
+  useEffect(() => {
+    setReviewCount(completedReviewCount(taskId, resource));
+  }, [
+    taskId,
+    resource.type,
+    resource.path_or_url,
+    persistedReviewState,
+    resource.metadata.review_task_id,
+  ]);
 
   return (
     <article className="artifact-card">
@@ -1213,7 +1270,7 @@ function ArtifactCard({
           >
             <Sparkles size={11} />
             {reviewState === "posted"
-              ? "Re-review"
+              ? `Re-review${reviewCount > 1 ? ` (${reviewCount})` : ""}`
               : reviewState === "failed"
                 ? "Retry review"
                 : "Review"}
