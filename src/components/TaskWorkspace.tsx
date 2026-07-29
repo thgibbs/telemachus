@@ -86,6 +86,25 @@ function githubIssueLabel(value: string): string {
   return githubIssueIdentity(value) ?? "GitHub issue";
 }
 
+function githubPullRequestNumber(value: string): string | null {
+  try {
+    const url = new URL(value);
+    const segments = url.pathname.split("/").filter(Boolean);
+    if (
+      url.protocol !== "https:" ||
+      url.hostname.toLowerCase() !== "github.com" ||
+      segments.length < 4 ||
+      segments[2] !== "pull" ||
+      !/^[1-9]\d*$/.test(segments[3])
+    ) {
+      return null;
+    }
+    return segments[3];
+  } catch {
+    return null;
+  }
+}
+
 function reportedGithubState(resource: Resource): string {
   return (
     resource.metadata.github_state ??
@@ -1188,6 +1207,10 @@ function ArtifactCard({
   );
   const reviewUrl = resource.metadata.review_url ?? "";
   const reviewable = ["github_pr", "local_document"].includes(resource.type);
+  const pullRequestNumber =
+    resource.type === "github_pr"
+      ? githubPullRequestNumber(resource.path_or_url)
+      : null;
   const presentation = {
     local_document: {
       icon: <FileText size={17} />,
@@ -1201,7 +1224,7 @@ function ArtifactCard({
     },
     github_pr: {
       icon: <GitPullRequest size={17} />,
-      type: "GitHub PR",
+      type: `GitHub PR${pullRequestNumber ? ` #${pullRequestNumber}` : ""}`,
       openAction: "Open in browser",
     },
   }[resource.type as "local_document" | "web_document" | "github_pr"];
