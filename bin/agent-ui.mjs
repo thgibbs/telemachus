@@ -37,7 +37,8 @@ agent-ui help
 The screen is small and every section competes for the same space. Long text does not
 scroll gracefully — it crowds out the rest of the screen.
 
-- **Plan item:** a title plus one brief line. No paragraphs, no nested detail.
+- **Plan item:** a stage name as the title (for example, "Phase 2") plus one
+  outcome-oriented line ending with that stage's goal.
 - **Status message:** a short phrase, not a sentence.
 - **Alert and todo:** one line of context. The reasoning belongs in the conversation.
 - **Status section:** one or two lines total.
@@ -76,7 +77,7 @@ The reverse holds too: do not add a todo for something that needs no human respo
 action. An observation with no decision attached is an alert.
 
 Do not create a new ID every time an item changes. Reuse stable IDs such as
-\`inspect\`, \`implement\`, \`verify\`, \`security-risk\`, and \`release-pr\`.
+\`phase-1\`, \`phase-2\`, \`security-risk\`, and \`release-pr\`.
 
 ## Task header
 
@@ -114,11 +115,15 @@ Task statuses:
 
 ## Plan
 
-**The plan is the work, not your process.** Items are the phases, tasks, or milestones of
-the thing being built — the ones the human would recognise from the issue, the plan
-document, or the request they made. Your own working steps ("read the issue", "search the
-codebase", "write the file") do not belong here; they are how you get an item done, not
-items themselves.
+**The plan is the work, not your process.** Use one item for each stage or phase of the
+thing being built. Your own working steps ("read the issue", "search the codebase",
+"write the file") do not belong here; they are how you complete a stage, not stages
+themselves.
+
+The title should be only the stage name, such as \`Phase 1\`, \`Phase 2\`, or the
+milestone name used by the source plan. The description must be one concise line
+describing what should happen during that stage. Whenever possible, end the line with
+the stage's goal or completion condition.
 
 When the effort already has a written plan, mirror its structure. The human should be able
 to look at this section and the document and see the same shape.
@@ -126,15 +131,20 @@ to look at this section and the document and see the same shape.
 Create or update plan items:
 
 \`\`\`bash
-agent-ui plan add inspect "Inspect the retry path" \\
-  --detail "Trace request IDs through the client and API." \\
+agent-ui plan add phase-1 "Phase 1" \\
+  --detail "Create regression tests for module A; mutation tests pass." \\
   --status in_progress
 
-agent-ui plan add implement "Implement the fix" --status pending
-agent-ui plan add verify "Run focused verification" --status pending
+agent-ui plan add phase-2 "Phase 2" \\
+  --detail "Migrate module A from React to Svelte; all tests pass." \\
+  --status pending
 
-agent-ui plan update inspect --status completed
-agent-ui plan update implement --status in_progress
+agent-ui plan add phase-3 "Phase 3" \\
+  --detail "Deploy module A to production; human tests pass." \\
+  --status pending
+
+agent-ui plan update phase-1 --status completed
+agent-ui plan update phase-2 --status in_progress
 \`\`\`
 
 Plan statuses:
@@ -151,7 +161,7 @@ Read or replace the plan:
 agent-ui plan list
 agent-ui plan replace --file plan.json
 agent-ui plan replace --stdin
-agent-ui plan remove verify
+agent-ui plan remove phase-3
 agent-ui plan clear
 \`\`\`
 
@@ -160,18 +170,25 @@ Example plan JSON:
 \`\`\`json
 [
   {
-    "id": "inspect",
-    "title": "Inspect the retry path",
-    "detail": "Trace request IDs through the client and API.",
+    "id": "phase-1",
+    "title": "Phase 1",
+    "detail": "Create regression tests for module A; mutation tests pass.",
     "status": "completed",
     "order": 0
   },
   {
-    "id": "implement",
-    "title": "Implement the fix",
-    "detail": "",
+    "id": "phase-2",
+    "title": "Phase 2",
+    "detail": "Migrate module A from React to Svelte; all tests pass.",
     "status": "in_progress",
     "order": 1
+  },
+  {
+    "id": "phase-3",
+    "title": "Phase 3",
+    "detail": "Deploy module A to production; human tests pass.",
+    "status": "pending",
+    "order": 2
   }
 ]
 \`\`\`
