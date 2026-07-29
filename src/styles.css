@@ -1581,8 +1581,9 @@ button:disabled {
   min-height: 27px;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  padding: 3px 5px 4px 10px;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 5px 4px;
   border-top: 1px solid #2a2d34;
   font-size: calc(8px * var(--text-scale));
   letter-spacing: 0.05em;
@@ -1622,22 +1623,13 @@ button:disabled {
   outline-offset: 1px;
 }
 
-.review-state {
-  min-height: 28px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 9px;
-  border-top: 1px solid #2a2d34;
-  color: var(--text-soft);
-  background: #17191e;
-  font-size: calc(9px * var(--text-scale));
-}
-
-.review-state > span {
+.artifact-review-status {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  margin-left: auto;
+  color: var(--text-soft);
+  white-space: nowrap;
 }
 
 .review-state-dot {

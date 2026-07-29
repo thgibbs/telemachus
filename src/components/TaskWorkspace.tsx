@@ -1187,7 +1187,9 @@ function ArtifactCard({
         <ExternalLink size={14} className="artifact-external" />
       </button>
       {reviewable && (
-        <div className="artifact-footer">
+        <div
+          className={`artifact-footer${reviewState ? ` review-state-${reviewState}` : ""}`}
+        >
           <button
             type="button"
             className="artifact-review-button"
@@ -1210,30 +1212,18 @@ function ArtifactCard({
             }}
           >
             <Sparkles size={11} />
-            {reviewState === "queued"
-              ? "Queued"
-              : reviewState === "running"
-                ? "Running"
-                : reviewState === "posted"
-                  ? "Re-review"
-                  : reviewState === "failed"
-                    ? "Retry review"
-                    : "Review"}
+            {reviewState === "posted"
+              ? "Re-review"
+              : reviewState === "failed"
+                ? "Retry review"
+                : "Review"}
           </button>
-        </div>
-      )}
-      {reviewable && reviewState && (
-        <div className={`review-state review-state-${reviewState}`}>
-          <span>
-            <span className="review-state-dot" />
-            {reviewState === "queued"
-              ? "Review queued"
-              : reviewState === "running"
-                ? "Review running"
-                : reviewState === "posted"
-                  ? "Review posted"
-                  : "Review did not post"}
-          </span>
+          {reviewInFlight && (
+            <span className="artifact-review-status">
+              <span className="review-state-dot" />
+              Reviewing
+            </span>
+          )}
           {reviewState === "posted" && reviewUrl && (
             <button
               type="button"
@@ -1257,6 +1247,18 @@ function ArtifactCard({
             >
               View review <ExternalLink size={11} />
             </button>
+          )}
+          {reviewState === "posted" && !reviewUrl && (
+            <span className="artifact-review-status">
+              <span className="review-state-dot" />
+              Review posted
+            </span>
+          )}
+          {reviewState === "failed" && (
+            <span className="artifact-review-status">
+              <span className="review-state-dot" />
+              Review failed
+            </span>
           )}
         </div>
       )}
