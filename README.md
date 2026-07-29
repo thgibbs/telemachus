@@ -1,11 +1,42 @@
 # Telemachus
 
-A local, task-focused terminal workspace for Codex, Claude, shell scripts, and
-ordinary command-line work. Each task keeps a real interactive terminal beside
-durable plan, artifact, human todo, summary, and alert panels, plus a private
-human scratchpad. Alerts appear only while active at the top of the left
-sidebar. The agent summary appears beneath To do as a Status accordion,
-automatically expands when updated, and can be collapsed to its headline.
+A local, task-focused terminal workspace for Claude, Codex, and humans.
+
+Telemachus keeps a real interactive terminal beside durable context for the
+work: alerts, human to dos, current status, a plan, related documents, and open
+pull requests. Instead of reconstructing the state of a long agent session from
+its transcript, you can glance at the task screen and see what is happening,
+what needs your attention, and what comes next.
+
+![Telemachus task workspace showing alerts, status, plan, terminal, and scratchpad](images/screenshot1.png)
+
+Each tab is an independent task with its own live shell and presentation state.
+Claude, Codex, or any shell script can update the screen through one
+task-scoped command, `agent-ui`; no MCP setup is required. Telemachus also
+includes a private, hideable scratchpad for human notes that is never exposed
+to the agent.
+
+Telemachus provides:
+
+- one durable task tab per live terminal session;
+- agent-maintained Status, Plan, Alerts, Artifacts, and PR sections;
+- questions and actions collected in a human To do section;
+- background Codex reviews for pull requests and local documents;
+- links from task context to local files, web documents, GitHub issues, and PRs;
+- accessible text scaling and hover magnification; and
+- a private human scratchpad outside the agent integration.
+
+## Start every agent session with the instructions
+
+When you launch Claude or Codex in a Telemachus terminal, tell it:
+
+> Before doing any work, run `agent-ui instructions` and follow the guidance it
+> prints. Keep the Telemachus task screen current throughout this session.
+
+Do this at the beginning of every session. `agent-ui instructions` prints the
+current, built-in guide for using the Status, Plan, Alerts, To do, Artifacts,
+and PR sections. Keeping the guidance in the CLI means the agent receives the
+instructions that match the version of Telemachus you are running.
 
 ## Prerequisites
 
@@ -28,6 +59,8 @@ codex login status
 ## Run it
 
 ```bash
+git clone https://github.com/thgibbs/telemachus.git
+cd telemachus
 npm install
 npm run desktop
 ```
@@ -36,10 +69,10 @@ The first launch creates an untitled task. Every terminal opened by Telemachus h
 the `agent-ui` command ready to use:
 
 ```bash
+agent-ui instructions
 agent-ui doctor
 agent-ui demo
 agent-ui help
-agent-ui instructions
 ```
 
 No MCP server, endpoint configuration, token copy, or working-directory
@@ -47,16 +80,14 @@ assumption is required. The application installs its bundled CLI into a private
 application-data directory and prepends that directory to the child terminal's
 `PATH`.
 
-## Give Claude or Codex screen access
+## How agents update the screen
 
-Launch the agent inside a Telemachus terminal and include a short instruction
-such as:
+The session-start instruction above is usually all you need. If you prefer a
+more explicit prompt, use:
 
-> Keep this task's Telemachus screen current with the `agent-ui` command. Update
-> task status, plan items, artifacts, summary, alerts, and human to dos
-> as useful.
-> Run `agent-ui instructions` for workflow guidance and `agent-ui help` for
-> the command reference.
+> Run `agent-ui instructions` before starting. Then keep this task's Telemachus
+> screen current with `agent-ui`: maintain the task status, plan, artifacts,
+> pull requests, summary, alerts, and human to dos as the work changes.
 
 The agent can then update each panel directly:
 
@@ -108,17 +139,20 @@ already present in Artifacts. URLs printed across terminal output chunks are
 covered by the retained-output scan; closed PRs and failed lookups are not
 added.
 
-Every open PR artifact has a **Review** button, and the Artifacts heading has a
-**Review** action for all open PRs. Local-document artifacts also have an
-individual **Review** button. Reviews run non-interactively in the background
-with `codex exec`, using `gpt-5.6-sol` at high reasoning in an isolated
-temporary Git workspace; they do not create or replace a terminal tab. Codex
-receives the linked GitHub issue and the selected artifacts. PR reviews are
-submitted to their pull requests, while local-document findings are posted as
-a comment on the linked issue. Each reviewed artifact records **Queued**,
-**Running**, and **Posted** states; after posting it links directly to the
-GitHub result and changes the action to **Re-review**. A run that exits without
-a newly posted result is shown as failed and can be retried.
+Every open PR and local-document artifact has a **Review** button. The
+Artifacts and PRs headings also provide bulk review actions for their eligible
+items. Reviews run non-interactively in the background with `codex exec`, using
+`gpt-5.6-sol` at high reasoning in an isolated temporary Git workspace; they do
+not create or replace a terminal tab. Codex receives the linked GitHub issue
+and the selected artifacts. PR reviews are submitted to their pull requests,
+while local-document findings are posted as a comment on the linked issue.
+Cards show **Reviewing** while a run is active and link directly to
+**View review** after it posts. The action then becomes **Re-review**, with
+completed re-reviews counted on the card. A run that exits without a newly
+posted result is shown as failed and can be retried.
+
+![Telemachus artifacts and pull requests with review controls and live review states](images/screenshot2.png)
+
 Run `agent-ui instructions` for agent workflow guidance, or see
 [CLI.md](CLI.md) for the complete command and JSON reference.
 
