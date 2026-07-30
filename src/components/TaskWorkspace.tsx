@@ -126,7 +126,15 @@ function reportedReviewState(resource: Resource): string {
 }
 
 function completedReviewCount(taskId: string, resource: Resource): number {
-  if (typeof window === "undefined") return 0;
+  const persistedCount = Number.parseInt(
+    resource.metadata.review_count ?? "",
+    10,
+  );
+  const backendCount =
+    Number.isSafeInteger(persistedCount) && persistedCount > 0
+      ? persistedCount
+      : 0;
+  if (typeof window === "undefined") return backendCount;
   const historyKey = JSON.stringify([
     taskId,
     resource.type,
@@ -161,7 +169,7 @@ function completedReviewCount(taskId: string, resource: Resource): number {
       // The current count is still usable even if persistence is unavailable.
     }
   }
-  return completedIds.length;
+  return Math.max(backendCount, completedIds.length);
 }
 
 function isPlanDocument(resource: Resource): boolean {
@@ -222,6 +230,7 @@ export function TaskWorkspace({
   onDocument,
   onTaskChanged,
   onLaunchReview,
+  onCancelReview,
   presentationChange,
   textScale,
 }: {
@@ -231,6 +240,7 @@ export function TaskWorkspace({
   onDocument: (document: PresentationDocument) => void;
   onTaskChanged: () => void;
   onLaunchReview: (resources: Resource[], issueUrl: string) => Promise<void>;
+  onCancelReview: (reviewRunId: string) => Promise<void>;
   presentationChange?: {
     id: string;
     at: number;
@@ -259,6 +269,10 @@ export function TaskWorkspace({
   const pullRequestDiscoveryTimerRef = useRef<number | null>(null);
   const pullRequestDiscoveryInFlightRef = useRef(false);
   const pullRequestDiscoveryPendingRef = useRef(false);
+  const renderedTerminalRef = useRef<{
+    sessionId: string;
+    output: string;
+  } | null>(null);
   const dragRef = useRef<{
     startX: number;
     startWidth: number;
@@ -366,13 +380,19 @@ export function TaskWorkspace({
 
   async function runTerminalPullRequestDiscovery() {
     if (!active) return;
+    const renderedTerminal = renderedTerminalRef.current;
+    if (!renderedTerminal) return;
     if (pullRequestDiscoveryInFlightRef.current) {
       pullRequestDiscoveryPendingRef.current = true;
       return;
     }
     pullRequestDiscoveryInFlightRef.current = true;
     try {
-      const next = await discoverOpenGithubPullRequests(task.id);
+      const next = await discoverOpenGithubPullRequests(
+        task.id,
+        renderedTerminal.sessionId,
+        renderedTerminal.output,
+      );
       if (next && next.revision > documentRevisionRef.current) {
         documentRevisionRef.current = next.revision;
         onDocument(next);
@@ -802,6 +822,7 @@ export function TaskWorkspace({
                               ? "Add the task’s GitHub issue link before starting a review."
                               : undefined
                           }
+                          onCancelReview={onCancelReview}
                         />
                       ) : (
                         <ResourceCard
@@ -889,6 +910,7 @@ export function TaskWorkspace({
                             ? "Add the task’s GitHub issue link before starting a review."
                             : undefined
                         }
+                        onCancelReview={onCancelReview}
                       />
                     ))}
                   </div>
@@ -982,7 +1004,10 @@ export function TaskWorkspace({
           taskId={task.id}
           active={active}
           textScale={textScale}
-          onOutputActivity={scheduleTerminalPullRequestDiscovery}
+          onOutputActivity={(sessionId, output) => {
+            renderedTerminalRef.current = { sessionId, output };
+            scheduleTerminalPullRequestDiscovery();
+          }}
         />
       </main>
       </div>
@@ -1189,15 +1214,18 @@ function ArtifactCard({
   taskId,
   resource,
   onReview,
+  onCancelReview,
   reviewDisabledReason,
 }: {
   taskId: string;
   resource: Resource;
   onReview?: () => Promise<void>;
+  onCancelReview?: (reviewRunId: string) => Promise<void>;
   reviewDisabledReason?: string;
 }) {
   const [opening, setOpening] = useState(false);
   const [reviewing, setReviewing] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState("");
   const persistedReviewState = reportedReviewState(resource);
   const reviewState = reviewing ? "queued" : persistedReviewState;
@@ -1206,6 +1234,7 @@ function ArtifactCard({
     completedReviewCount(taskId, resource),
   );
   const reviewUrl = resource.metadata.review_url ?? "";
+  const reviewTaskId = resource.metadata.review_task_id ?? "";
   const reviewable = ["github_pr", "local_document"].includes(resource.type);
   const pullRequestNumber =
     resource.type === "github_pr"
@@ -1236,6 +1265,7 @@ function ArtifactCard({
     resource.type,
     resource.path_or_url,
     persistedReviewState,
+    resource.metadata.review_count,
     resource.metadata.review_task_id,
   ]);
 
@@ -1294,14 +1324,39 @@ function ArtifactCard({
             <Sparkles size={11} />
             {reviewState === "posted"
               ? `Re-review${reviewCount > 1 ? ` (${reviewCount})` : ""}`
-              : reviewState === "failed"
+              : reviewState === "failed" || reviewState === "cancelled"
                 ? "Retry review"
                 : "Review"}
           </button>
           {reviewInFlight && (
-            <span className="artifact-review-status">
-              <span className="review-state-dot" />
-              Reviewing
+            <span className="artifact-review-progress">
+              <span className="artifact-review-status">
+                <span className="review-state-dot" />
+                {cancelling ? "Cancelling" : "Reviewing"}
+              </span>
+              <button
+                type="button"
+                className="artifact-cancel-review"
+                disabled={cancelling || !onCancelReview || !reviewTaskId}
+                aria-label={`Cancel review of ${resource.label}`}
+                title="Cancel this Codex review run"
+                onClick={() => {
+                  if (!onCancelReview || !reviewTaskId) return;
+                  setCancelling(true);
+                  setError("");
+                  onCancelReview(reviewTaskId)
+                    .catch((nextError) =>
+                      setError(
+                        nextError instanceof Error
+                          ? nextError.message
+                          : String(nextError),
+                      ),
+                    )
+                    .finally(() => setCancelling(false));
+                }}
+              >
+                Cancel
+              </button>
             </span>
           )}
           {reviewState === "posted" && reviewUrl && (
@@ -1338,6 +1393,12 @@ function ArtifactCard({
             <span className="artifact-review-status">
               <span className="review-state-dot" />
               Review failed
+            </span>
+          )}
+          {reviewState === "cancelled" && (
+            <span className="artifact-review-status">
+              <span className="review-state-dot" />
+              Review cancelled
             </span>
           )}
         </div>

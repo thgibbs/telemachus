@@ -13,6 +13,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   applyOperation,
+  cancelCodexArtifactReview,
   closeTask,
   createTask,
   getActiveTask,
@@ -174,7 +175,7 @@ export function App() {
       ...taskTabListRef.current.querySelectorAll<HTMLElement>("[data-task-id]"),
     ].find((element) => element.dataset.taskId === activeTaskId);
     activeTab?.scrollIntoView({
-      behavior: "smooth",
+      behavior: "auto",
       block: "nearest",
       inline: "nearest",
     });
@@ -297,6 +298,17 @@ export function App() {
     [loadDocument],
   );
 
+  const cancelReview = useCallback(
+    async (sourceTaskId: string, reviewRunId: string) => {
+      const next = await cancelCodexArtifactReview(sourceTaskId, reviewRunId);
+      setDocuments((current) => ({
+        ...current,
+        [sourceTaskId]: next,
+      }));
+    },
+    [],
+  );
+
   const chooseTextSize = useCallback((next: TextSize) => {
     localStorage.setItem(textSizeKey, next);
     setTextSize(next);
@@ -372,7 +384,7 @@ export function App() {
     <div className="app-shell" data-text-size={textSize}>
       <header className="app-chrome" data-tauri-drag-region="deep">
         <div className="traffic-light-space" data-tauri-drag-region />
-        <div className="brand" data-tauri-drag-region>
+        <div className="brand" data-tauri-drag-region="deep">
           <div className="brand-mark">
             <TerminalSquare size={15} />
           </div>
@@ -640,6 +652,9 @@ export function App() {
               onTaskChanged={() => reloadTasks().catch(console.error)}
               onLaunchReview={(resources, issueUrl) =>
                 launchReview(task.id, resources, issueUrl)
+              }
+              onCancelReview={(reviewRunId) =>
+                cancelReview(task.id, reviewRunId)
               }
               presentationChange={presentationChanges[task.id]}
               textScale={textSizeScale[textSize]}

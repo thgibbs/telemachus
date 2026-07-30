@@ -18,7 +18,10 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command as ProcessCommand, Stdio},
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, RwLock,
+    },
     thread,
     time::Duration,
 };
@@ -351,6 +354,15 @@ struct TerminalSession {
     output: Mutex<TerminalBuffer>,
 }
 
+#[derive(Clone)]
+struct ActiveReview {
+    source_task_id: String,
+    targets: Vec<String>,
+    started_at: String,
+    child: Arc<Mutex<Child>>,
+    cancel_requested: Arc<AtomicBool>,
+}
+
 #[derive(Default)]
 struct TerminalBuffer {
     start_offset: u64,
@@ -382,6 +394,7 @@ impl TerminalBuffer {
 pub struct AppState {
     db: Mutex<Connection>,
     terminals: Mutex<HashMap<String, Arc<TerminalSession>>>,
+    active_reviews: Mutex<HashMap<String, ActiveReview>>,
     closed_terminal_pull_requests: Mutex<HashMap<String, HashSet<String>>>,
     tokens: Mutex<HashMap<String, String>>,
     bridge_endpoint: RwLock<String>,
@@ -398,6 +411,7 @@ impl AppState {
         Ok(Self {
             db: Mutex::new(connection),
             terminals: Mutex::new(HashMap::new()),
+            active_reviews: Mutex::new(HashMap::new()),
             closed_terminal_pull_requests: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
             bridge_endpoint: RwLock::new(String::new()),
@@ -415,6 +429,7 @@ impl AppState {
         Self {
             db: Mutex::new(connection),
             terminals: Mutex::new(HashMap::new()),
+            active_reviews: Mutex::new(HashMap::new()),
             closed_terminal_pull_requests: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
             bridge_endpoint: RwLock::new("http://127.0.0.1:1".into()),
@@ -591,6 +606,7 @@ fn create_task_core(
 
 #[tauri::command]
 fn close_task(state: tauri::State<'_, Arc<AppState>>, task_id: String) -> Result<(), String> {
+    stop_active_reviews_for_task(&state, &task_id)?;
     let sessions: Vec<String> = state
         .terminals
         .lock()
@@ -628,6 +644,41 @@ fn close_task(state: tauri::State<'_, Arc<AppState>>, task_id: String) -> Result
         let path = PathBuf::from(directory);
         if is_codex_review_workspace(&path) {
             let _ = std::fs::remove_dir_all(path);
+        }
+    }
+    Ok(())
+}
+
+fn stop_active_reviews_for_task(state: &AppState, task_id: &str) -> Result<(), String> {
+    let reviews = state
+        .active_reviews
+        .lock()
+        .map_err(display_error)?
+        .values()
+        .filter(|review| review.source_task_id == task_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    for review in reviews {
+        review.cancel_requested.store(true, Ordering::SeqCst);
+        if let Ok(mut child) = review.child.lock() {
+            let _ = child.kill();
+        }
+    }
+    Ok(())
+}
+
+fn stop_all_active_reviews(state: &AppState) -> Result<(), String> {
+    let reviews = state
+        .active_reviews
+        .lock()
+        .map_err(display_error)?
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    for review in reviews {
+        review.cancel_requested.store(true, Ordering::SeqCst);
+        if let Ok(mut child) = review.child.lock() {
+            let _ = child.kill();
         }
     }
     Ok(())
@@ -1366,6 +1417,16 @@ fn terminal_id_for_task<'a>(
         .map(|(session_id, _)| session_id.to_string())
 }
 
+fn terminal_belongs_to_task<'a>(
+    mut sessions: impl Iterator<Item = (&'a str, &'a str)>,
+    session_id: &str,
+    task_id: &str,
+) -> bool {
+    sessions.any(|(candidate_session_id, candidate_task_id)| {
+        candidate_session_id == session_id && candidate_task_id == task_id
+    })
+}
+
 fn create_terminal_core(
     state: &Arc<AppState>,
     task_id: String,
@@ -1774,10 +1835,12 @@ fn terminal_github_pull_request_urls(output: &str) -> Vec<String> {
                 .then_some(index)
             })
             .unwrap_or(candidate.len());
-        let candidate = candidate[..end]
-            .trim_end_matches(|character: char| {
-                matches!(character, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}')
-            });
+        let candidate = candidate[..end].trim_end_matches(|character: char| {
+            matches!(
+                character,
+                '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}'
+            )
+        });
         let Ok(reference) = github_pull_request_reference(candidate) else {
             continue;
         };
@@ -1811,7 +1874,11 @@ fn github_pull_request_view(target: &str) -> Result<GitHubPullRequestView, Strin
 
 fn next_terminal_pull_request_id(document: &PresentationDocument, number: u64) -> String {
     let base = format!("terminal-pr-{number}");
-    if !document.resources.iter().any(|resource| resource.id == base) {
+    if !document
+        .resources
+        .iter()
+        .any(|resource| resource.id == base)
+    {
         return base;
     }
     for suffix in 2.. {
@@ -1831,34 +1898,35 @@ fn next_terminal_pull_request_id(document: &PresentationDocument, number: u64) -
 fn discover_open_github_pull_requests(
     state: tauri::State<'_, Arc<AppState>>,
     task_id: String,
+    session_id: String,
+    rendered_output: String,
 ) -> Result<PresentationDocument, String> {
-    discover_open_github_pull_requests_core(&state, task_id)
+    discover_open_github_pull_requests_core(&state, task_id, session_id, rendered_output)
 }
 
 fn discover_open_github_pull_requests_core(
     state: &AppState,
     task_id: String,
+    session_id: String,
+    rendered_output: String,
 ) -> Result<PresentationDocument, String> {
     validate_id(&task_id)?;
-    let session = state
-        .terminals
-        .lock()
-        .map_err(display_error)?
-        .values()
-        .find(|session| session.task_id == task_id)
-        .cloned();
-    let Some(session) = session else {
-        return get_document_core(state, &task_id);
-    };
-    let output = session
-        .output
-        .lock()
-        .map_err(display_error)?
-        .data
-        .iter()
-        .copied()
-        .collect::<Vec<_>>();
-    let candidates = terminal_github_pull_request_urls(&String::from_utf8_lossy(&output));
+    validate_id(&session_id)?;
+    if rendered_output.len() > MAX_TERMINAL_BUFFER {
+        return Err("terminal_rendered_output_too_large".into());
+    }
+    let terminals = state.terminals.lock().map_err(display_error)?;
+    if !terminal_belongs_to_task(
+        terminals
+            .iter()
+            .map(|(id, session)| (id.as_str(), session.task_id.as_str())),
+        &session_id,
+        &task_id,
+    ) {
+        return Err("terminal_task_mismatch".into());
+    }
+    drop(terminals);
+    let candidates = terminal_github_pull_request_urls(&rendered_output);
     if candidates.is_empty() {
         return get_document_core(state, &task_id);
     }
@@ -2229,10 +2297,45 @@ fn update_source_review_state(
         let Some(update) = updates.get(&resource.path_or_url) else {
             continue;
         };
-        match resource.resource_type.as_str() {
-            "github_pr" => changed_pull_requests = true,
-            "local_document" => changed_artifacts = true,
+        let is_pull_request = match resource.resource_type.as_str() {
+            "github_pr" => true,
+            "local_document" => false,
             _ => continue,
+        };
+        if update.state != "queued"
+            && resource
+                .metadata
+                .get("review_task_id")
+                .is_some_and(|current| current != review_task_id)
+        {
+            continue;
+        }
+        if update.state != "queued"
+            && resource
+                .metadata
+                .get("review_state")
+                .is_some_and(|current| {
+                    matches!(current.as_str(), "posted" | "failed" | "cancelled")
+                        && current != &update.state
+                })
+        {
+            continue;
+        }
+        if update.state == "queued"
+            && resource.metadata.get("review_state").map(String::as_str) == Some("posted")
+            && !resource.metadata.contains_key("review_count")
+        {
+            resource.metadata.insert("review_count".into(), "1".into());
+            if let Some(previous_review_id) = resource.metadata.get("review_task_id").cloned() {
+                resource
+                    .metadata
+                    .insert("review_counted_task_id".into(), previous_review_id);
+            }
+        }
+        if is_pull_request {
+            changed_pull_requests = true;
+        } else {
+            changed_artifacts = true;
         }
         changed = true;
         resource
@@ -2244,6 +2347,25 @@ fn update_source_review_state(
         resource
             .metadata
             .insert("review_started_at".into(), started_at.into());
+        if update.state == "posted"
+            && resource
+                .metadata
+                .get("review_counted_task_id")
+                .is_none_or(|counted| counted != review_task_id)
+        {
+            let count = resource
+                .metadata
+                .get("review_count")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0)
+                .saturating_add(1);
+            resource
+                .metadata
+                .insert("review_count".into(), count.to_string());
+            resource
+                .metadata
+                .insert("review_counted_task_id".into(), review_task_id.into());
+        }
         match update.review_url.as_deref() {
             Some(review_url) => {
                 resource
@@ -2345,6 +2467,7 @@ fn github_review_url(
 fn find_posted_review_urls(
     pull_requests: &[GitHubPullRequestReference],
     started_at: &str,
+    cancel_requested: &AtomicBool,
 ) -> HashMap<String, String> {
     let Some(login) = github_authenticated_login() else {
         return HashMap::new();
@@ -2355,7 +2478,13 @@ fn find_posted_review_urls(
     let started_at = started_at.with_timezone(&Utc);
     let mut found = HashMap::new();
     for attempt in 0..6 {
+        if cancel_requested.load(Ordering::SeqCst) {
+            break;
+        }
         for pull_request in pull_requests {
+            if cancel_requested.load(Ordering::SeqCst) {
+                break;
+            }
             if found.contains_key(&pull_request.url) {
                 continue;
             }
@@ -2408,12 +2537,19 @@ fn github_issue_comment_url(
         .map(|(_, url)| url)
 }
 
-fn find_posted_issue_comment_url(issue: &GitHubIssueReference, started_at: &str) -> Option<String> {
+fn find_posted_issue_comment_url(
+    issue: &GitHubIssueReference,
+    started_at: &str,
+    cancel_requested: &AtomicBool,
+) -> Option<String> {
     let login = github_authenticated_login()?;
     let started_at = DateTime::parse_from_rfc3339(started_at)
         .ok()?
         .with_timezone(&Utc);
     for attempt in 0..6 {
+        if cancel_requested.load(Ordering::SeqCst) {
+            return None;
+        }
         if let Some(url) = github_issue_comment_url(issue, &login, started_at) {
             return Some(url);
         }
@@ -2424,9 +2560,17 @@ fn find_posted_issue_comment_url(issue: &GitHubIssueReference, started_at: &str)
     None
 }
 
+fn finish_active_review(state: &AppState, review_run_id: &str, review_workspace: &Path) {
+    if let Ok(mut reviews) = state.active_reviews.lock() {
+        reviews.remove(review_run_id);
+    }
+    let _ = std::fs::remove_dir_all(review_workspace);
+}
+
 fn watch_codex_review(
     state: Arc<AppState>,
-    mut child: Child,
+    child: Arc<Mutex<Child>>,
+    cancel_requested: Arc<AtomicBool>,
     source_task_id: String,
     review_run_id: String,
     pull_requests: Vec<GitHubPullRequestReference>,
@@ -2439,12 +2583,21 @@ fn watch_codex_review(
         .name(format!("review-{review_run_id}"))
         .spawn(move || {
             let succeeded = loop {
-                match child.try_wait() {
+                let status = match child.lock() {
+                    Ok(mut child) => child.try_wait(),
+                    Err(_) => break false,
+                };
+                match status {
                     Ok(Some(status)) => break status.success(),
                     Ok(None) => thread::sleep(Duration::from_secs(1)),
                     Err(_) => break false,
                 }
             };
+
+            if cancel_requested.load(Ordering::SeqCst) {
+                finish_active_review(&state, &review_run_id, &review_workspace);
+                return;
+            }
 
             if !succeeded {
                 let targets = pull_requests
@@ -2469,18 +2622,24 @@ fn watch_codex_review(
                     &started_at,
                     &updates,
                 );
-                let _ = std::fs::remove_dir_all(review_workspace);
+                finish_active_review(&state, &review_run_id, &review_workspace);
                 return;
             }
 
-            let mut review_urls = find_posted_review_urls(&pull_requests, &started_at);
+            let mut review_urls =
+                find_posted_review_urls(&pull_requests, &started_at, &cancel_requested);
             if !documents.is_empty() {
-                if let Some(issue_comment_url) = find_posted_issue_comment_url(&issue, &started_at)
+                if let Some(issue_comment_url) =
+                    find_posted_issue_comment_url(&issue, &started_at, &cancel_requested)
                 {
                     for document in &documents {
                         review_urls.insert(document.source_path.clone(), issue_comment_url.clone());
                     }
                 }
+            }
+            if cancel_requested.load(Ordering::SeqCst) {
+                finish_active_review(&state, &review_run_id, &review_workspace);
+                return;
             }
             let targets = pull_requests
                 .iter()
@@ -2519,8 +2678,66 @@ fn watch_codex_review(
                 &started_at,
                 &updates,
             );
-            let _ = std::fs::remove_dir_all(review_workspace);
+            finish_active_review(&state, &review_run_id, &review_workspace);
         });
+}
+
+#[tauri::command]
+fn cancel_codex_artifact_review(
+    state: tauri::State<'_, Arc<AppState>>,
+    source_task_id: String,
+    review_run_id: String,
+) -> Result<PresentationDocument, String> {
+    cancel_codex_artifact_review_core(&state, source_task_id, review_run_id)
+}
+
+fn cancel_codex_artifact_review_core(
+    state: &AppState,
+    source_task_id: String,
+    review_run_id: String,
+) -> Result<PresentationDocument, String> {
+    validate_id(&source_task_id)?;
+    validate_id(&review_run_id)?;
+    let review = state
+        .active_reviews
+        .lock()
+        .map_err(display_error)?
+        .get(&review_run_id)
+        .cloned()
+        .ok_or_else(|| "review_not_running".to_string())?;
+    if review.source_task_id != source_task_id {
+        return Err("review_task_mismatch".into());
+    }
+    let document = get_document_core(state, &source_task_id)?;
+    let has_running_target = document.resources.iter().any(|resource| {
+        review.targets.contains(&resource.path_or_url)
+            && resource.metadata.get("review_task_id") == Some(&review_run_id)
+            && resource
+                .metadata
+                .get("review_state")
+                .is_some_and(|state| matches!(state.as_str(), "queued" | "running"))
+    });
+    if !has_running_target {
+        return Err("review_not_running".into());
+    }
+    review.cancel_requested.store(true, Ordering::SeqCst);
+    if let Ok(mut child) = review.child.lock() {
+        let _ = child.kill();
+    }
+    let updates = review_updates(
+        &review.targets,
+        "cancelled",
+        &HashMap::new(),
+        Some("Codex review cancelled by the user."),
+    );
+    update_source_review_state(
+        state,
+        &source_task_id,
+        &review_run_id,
+        &review.started_at,
+        &updates,
+    )?;
+    get_document_core(state, &source_task_id)
 }
 
 #[tauri::command]
@@ -2657,17 +2874,37 @@ fn launch_codex_artifact_review_core(
             return Err(display_error(error));
         }
     };
+    let child = Arc::new(Mutex::new(child));
+    let cancel_requested = Arc::new(AtomicBool::new(false));
+    state.active_reviews.lock().map_err(display_error)?.insert(
+        review_run_id.clone(),
+        ActiveReview {
+            source_task_id: source_task_id.clone(),
+            targets: targets.clone(),
+            started_at: timestamp.clone(),
+            child: child.clone(),
+            cancel_requested: cancel_requested.clone(),
+        },
+    );
     let running_updates = review_updates(&targets, "running", &HashMap::new(), None);
-    let _ = update_source_review_state(
+    if let Err(error) = update_source_review_state(
         state,
         &source_task_id,
         &review_run_id,
         &timestamp,
         &running_updates,
-    );
+    ) {
+        cancel_requested.store(true, Ordering::SeqCst);
+        if let Ok(mut child) = child.lock() {
+            let _ = child.kill();
+        }
+        finish_active_review(state, &review_run_id, &review_workspace);
+        return Err(error);
+    }
     watch_codex_review(
         state.clone(),
         child,
+        cancel_requested,
         source_task_id,
         review_run_id.clone(),
         pull_requests,
@@ -3068,6 +3305,12 @@ pub fn run() {
             app.manage(state);
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                let state = window.state::<Arc<AppState>>();
+                let _ = stop_all_active_reviews(&state);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             list_tasks,
             create_task,
@@ -3090,6 +3333,7 @@ pub fn run() {
             get_closed_github_pull_requests,
             discover_open_github_pull_requests,
             launch_codex_artifact_review,
+            cancel_codex_artifact_review,
             get_bridge_info
         ])
         .run(tauri::generate_context!())
@@ -3317,6 +3561,134 @@ mod tests {
             posted_document.resources[0].metadata.get("review_url"),
             Some(&review_url)
         );
+        assert_eq!(
+            posted_document.resources[0]
+                .metadata
+                .get("review_count")
+                .map(String::as_str),
+            Some("1")
+        );
+
+        update_source_review_state(&state, &task.id, "review-task-1", &started_at, &posted)
+            .unwrap();
+        assert_eq!(
+            get_document_core(&state, &task.id).unwrap().resources[0]
+                .metadata
+                .get("review_count")
+                .map(String::as_str),
+            Some("1")
+        );
+
+        let second_started_at = now();
+        let second_running = review_updates(
+            std::slice::from_ref(&pull_request.url),
+            "queued",
+            &HashMap::new(),
+            None,
+        );
+        update_source_review_state(
+            &state,
+            &task.id,
+            "review-task-2",
+            &second_started_at,
+            &second_running,
+        )
+        .unwrap();
+        let second_posted = review_updates(
+            std::slice::from_ref(&pull_request.url),
+            "posted",
+            &HashMap::from([(pull_request.url.clone(), review_url)]),
+            None,
+        );
+        update_source_review_state(
+            &state,
+            &task.id,
+            "review-task-2",
+            &second_started_at,
+            &second_posted,
+        )
+        .unwrap();
+        assert_eq!(
+            get_document_core(&state, &task.id).unwrap().resources[0]
+                .metadata
+                .get("review_count")
+                .map(String::as_str),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn running_review_can_be_cancelled() {
+        let state = AppState::in_memory();
+        let task = create_task_core(&state, None).unwrap();
+        let pull_request =
+            github_pull_request_reference("https://github.com/openai/codex/pull/123").unwrap();
+        apply_operation_core(
+            &state,
+            operation(
+                &task.id,
+                "replace_resources",
+                json!({
+                    "resources": [{
+                        "id": "implementation-pr",
+                        "type": "github_pr",
+                        "label": "openai/codex PR #123",
+                        "path_or_url": pull_request.url.clone(),
+                        "status": "reported",
+                        "metadata": {"github_state": "open"}
+                    }]
+                }),
+            ),
+        )
+        .unwrap();
+        let review_run_id = "review-task-1";
+        let started_at = now();
+        let running = review_updates(
+            std::slice::from_ref(&pull_request.url),
+            "running",
+            &HashMap::new(),
+            None,
+        );
+        update_source_review_state(&state, &task.id, review_run_id, &started_at, &running).unwrap();
+
+        let child = Arc::new(Mutex::new(
+            ProcessCommand::new("/bin/sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .unwrap(),
+        ));
+        let cancel_requested = Arc::new(AtomicBool::new(false));
+        state.active_reviews.lock().unwrap().insert(
+            review_run_id.into(),
+            ActiveReview {
+                source_task_id: task.id.clone(),
+                targets: vec![pull_request.url],
+                started_at,
+                child: child.clone(),
+                cancel_requested: cancel_requested.clone(),
+            },
+        );
+
+        let document =
+            cancel_codex_artifact_review_core(&state, task.id, review_run_id.into()).unwrap();
+        assert!(cancel_requested.load(Ordering::SeqCst));
+        assert_eq!(
+            document.resources[0]
+                .metadata
+                .get("review_state")
+                .map(String::as_str),
+            Some("cancelled")
+        );
+        assert_eq!(
+            document.resources[0]
+                .metadata
+                .get("review_error")
+                .map(String::as_str),
+            Some("Codex review cancelled by the user.")
+        );
+
+        state.active_reviews.lock().unwrap().remove(review_run_id);
+        let _ = child.lock().unwrap().wait();
     }
 
     #[test]
@@ -3400,6 +3772,16 @@ mod tests {
             terminal_id_for_task(sessions.iter().copied(), "missing"),
             None
         );
+        assert!(terminal_belongs_to_task(
+            sessions.iter().copied(),
+            "session-b",
+            "task-b"
+        ));
+        assert!(!terminal_belongs_to_task(
+            sessions.iter().copied(),
+            "session-a",
+            "task-b"
+        ));
     }
 
     #[test]
@@ -3566,13 +3948,8 @@ mod tests {
         assert_eq!(document.questions[0].state, QuestionState::Open);
         assert!(has_attention(&document));
         assert_eq!(
-            answer_question_core(
-                &state,
-                task.id.clone(),
-                "deploy".into(),
-                "Done".into()
-            )
-            .unwrap_err(),
+            answer_question_core(&state, task.id.clone(), "deploy".into(), "Done".into())
+                .unwrap_err(),
             "todo_is_not_question"
         );
 

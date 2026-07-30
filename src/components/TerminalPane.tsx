@@ -11,6 +11,22 @@ import {
 import { TerminalSquare } from "lucide-react";
 import type { TerminalOutput } from "../types";
 
+function renderedTerminalText(terminal: Terminal): string {
+  const buffer = terminal.buffer.active;
+  const lines: string[] = [];
+  for (let index = 0; index < buffer.length; index += 1) {
+    const line = buffer.getLine(index);
+    if (!line) continue;
+    const text = line.translateToString(true);
+    if (line.isWrapped && lines.length > 0) {
+      lines[lines.length - 1] += text;
+    } else {
+      lines.push(text);
+    }
+  }
+  return lines.join("\n");
+}
+
 export function TerminalPane({
   taskId,
   active,
@@ -20,7 +36,7 @@ export function TerminalPane({
   taskId: string;
   active: boolean;
   textScale: number;
-  onOutputActivity?: () => void;
+  onOutputActivity?: (sessionId: string, renderedOutput: string) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -82,6 +98,27 @@ export function TerminalPane({
     terminal.loadAddon(fit);
     terminal.open(hostRef.current);
     terminalRef.current = terminal;
+    let cancelled = false;
+    let outputReportTimer: number | null = null;
+
+    const reportOutputActivity = (sessionId = sessionRef.current) => {
+      if (!sessionId) return;
+      if (outputReportTimer !== null) {
+        window.clearTimeout(outputReportTimer);
+      }
+      outputReportTimer = window.setTimeout(() => {
+        outputReportTimer = null;
+        if (cancelled) return;
+        onOutputActivityRef.current?.(
+          sessionId,
+          renderedTerminalText(terminal),
+        );
+      }, 100);
+    };
+
+    const renderOutput = (sessionId: string, data: Uint8Array) => {
+      terminal.write(data, () => reportOutputActivity(sessionId));
+    };
 
     const encodeKey = (event: KeyboardEvent): number[] | null => {
       if (event.isComposing || event.metaKey) return null;
@@ -197,7 +234,6 @@ export function TerminalPane({
       ).catch(reportError);
     });
 
-    let cancelled = false;
     let unlisten: (() => void) | undefined;
     let attached = false;
     const pendingOutput: TerminalOutput[] = [];
@@ -221,7 +257,7 @@ export function TerminalPane({
         );
         setRecovering(false);
         setLegacyHost(true);
-        onOutputActivityRef.current?.();
+        reportOutputActivity(payload.session_id);
         return;
       }
       if (
@@ -234,13 +270,12 @@ export function TerminalPane({
         attached = true;
         pendingOutput.length = 0;
         terminal.reset();
-        terminal.write(new Uint8Array(payload.data));
+        renderOutput(payload.session_id, new Uint8Array(payload.data));
         resizeTerminal(payload.session_id, terminal.cols, terminal.rows).catch(
           reportError,
         );
         setRecovering(false);
         setLegacyHost(true);
-        onOutputActivityRef.current?.();
         return;
       }
       if (!sessionRef.current) {
@@ -253,8 +288,7 @@ export function TerminalPane({
         pendingOutput.push(payload);
         return;
       }
-      terminal.write(new Uint8Array(payload.data));
-      onOutputActivityRef.current?.();
+      renderOutput(payload.session_id, new Uint8Array(payload.data));
     });
     outputListenerReady.then((cleanup) => {
       if (cancelled) cleanup();
@@ -272,7 +306,7 @@ export function TerminalPane({
           let nextOffset = 0;
           try {
             const snapshot = await getTerminalSnapshot(sessionId);
-            terminal.write(new Uint8Array(snapshot.data));
+            renderOutput(sessionId, new Uint8Array(snapshot.data));
             nextOffset = snapshot.next_offset;
           } catch {
             // Older live hosts can still reattach to the PTY, but cannot replay
@@ -295,14 +329,17 @@ export function TerminalPane({
               const endOffset = payload.offset + payload.data.length;
               if (endOffset <= nextOffset) return;
               const firstByte = Math.max(0, nextOffset - payload.offset);
-              terminal.write(new Uint8Array(payload.data.slice(firstByte)));
+              renderOutput(
+                sessionId,
+                new Uint8Array(payload.data.slice(firstByte)),
+              );
               nextOffset = endOffset;
             });
           attached = true;
           pendingOutput.length = 0;
-          onOutputActivityRef.current?.();
           requestAnimationFrame(() => {
             fitAndResize();
+            reportOutputActivity(sessionId);
             if (activeRef.current) {
               inputArmedRef.current = true;
               terminal.focus();
@@ -320,6 +357,9 @@ export function TerminalPane({
 
     return () => {
       cancelled = true;
+      if (outputReportTimer !== null) {
+        window.clearTimeout(outputReportTimer);
+      }
       startingRef.current = false;
       observer.disconnect();
       window.removeEventListener("pointerdown", pointerDown, true);
@@ -341,7 +381,15 @@ export function TerminalPane({
   useEffect(() => {
     inputArmedRef.current = active;
     if (!active || !terminalRef.current) return;
-    requestAnimationFrame(() => terminalRef.current?.focus());
+    requestAnimationFrame(() => {
+      terminalRef.current?.focus();
+      if (terminalRef.current && sessionRef.current) {
+        onOutputActivityRef.current?.(
+          sessionRef.current,
+          renderedTerminalText(terminalRef.current),
+        );
+      }
+    });
   }, [active]);
 
   return (

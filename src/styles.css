@@ -112,6 +112,7 @@ button:disabled {
 .brand {
   display: flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 8px;
   padding: 0 14px 0 2px;
   color: #d9dbe1;
@@ -1632,6 +1633,39 @@ button:disabled {
   white-space: nowrap;
 }
 
+.artifact-review-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.artifact-review-progress .artifact-review-status {
+  margin-left: 0;
+}
+
+.artifact-cancel-review {
+  padding: 2px 5px;
+  border: 1px solid #71454c;
+  border-radius: 4px;
+  background: #2a1d21;
+  color: #ef9da8;
+  font: inherit;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.artifact-cancel-review:hover:not(:disabled) {
+  border-color: #9c5964;
+  background: #362328;
+  color: #ffc0c8;
+}
+
+.artifact-cancel-review:disabled {
+  opacity: 0.48;
+}
+
 .review-state-dot {
   width: 7px;
   height: 7px;
@@ -1659,6 +1693,14 @@ button:disabled {
 
 .review-state-failed .review-state-dot {
   background: var(--red);
+}
+
+.review-state-cancelled {
+  color: var(--text-soft);
+}
+
+.review-state-cancelled .review-state-dot {
+  background: var(--muted);
 }
 
 .review-result-link {

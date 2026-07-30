@@ -132,12 +132,12 @@ it is reported twice. The desktop app also removes closed or merged PRs after
 checking GitHub; an agent can make that immediate with
 `agent-ui artifact update pr --meta github_state=closed`.
 
-Telemachus also watches each task's retained terminal output for GitHub pull
+Telemachus also watches each task's rendered terminal buffer for GitHub pull
 request links. After terminal activity settles, it verifies newly discovered
 links with the authenticated GitHub CLI and adds only open PRs that are not
-already present in Artifacts. URLs printed across terminal output chunks are
-covered by the retained-output scan; closed PRs and failed lookups are not
-added.
+already present in Artifacts. Discovery is bound to the exact PTY session for
+that task, and wrapped terminal lines are reconstructed before scanning.
+Closed PRs and failed lookups are not added.
 
 Every open PR and local-document artifact has a **Review** button. The
 Artifacts and PRs headings also provide bulk review actions for their eligible
@@ -149,7 +149,9 @@ while local-document findings are posted as a comment on the linked issue.
 Cards show **Reviewing** while a run is active and link directly to
 **View review** after it posts. The action then becomes **Re-review**, with
 completed re-reviews counted on the card. A run that exits without a newly
-posted result is shown as failed and can be retried.
+posted result is shown as failed and can be retried. Active reviews can be
+cancelled from their cards; Telemachus terminates the background Codex process
+and also cleans up active review processes when a task or the app closes.
 
 ![Telemachus artifacts and pull requests with review controls and live review states](images/screenshot2.png)
 

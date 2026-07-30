@@ -402,9 +402,15 @@ export async function getClosedGithubPullRequests(
 
 export async function discoverOpenGithubPullRequests(
   taskId: string,
+  sessionId: string,
+  renderedOutput: string,
 ): Promise<PresentationDocument | null> {
   if (isTauri()) {
-    return invoke("discover_open_github_pull_requests", { taskId });
+    return invoke("discover_open_github_pull_requests", {
+      taskId,
+      sessionId,
+      renderedOutput,
+    });
   }
   return null;
 }
@@ -428,6 +434,21 @@ export async function launchCodexArtifactReview(
   }
   throw new Error(
     "Desktop host required. Start Telemachus with `npm run desktop` to launch a Codex review.",
+  );
+}
+
+export async function cancelCodexArtifactReview(
+  sourceTaskId: string,
+  reviewRunId: string,
+): Promise<PresentationDocument> {
+  if (isTauri()) {
+    return invoke("cancel_codex_artifact_review", {
+      sourceTaskId,
+      reviewRunId,
+    });
+  }
+  throw new Error(
+    "Desktop host required. Start Telemachus with `npm run desktop` to cancel a Codex review.",
   );
 }
 
