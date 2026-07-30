@@ -7,6 +7,8 @@ export type TaskStatus =
   | "failed"
   | "cancelled";
 
+export type ReviewProvider = "codex" | "claude";
+
 export type ItemStatus =
   | "pending"
   | "in_progress"

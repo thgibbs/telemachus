@@ -4,6 +4,7 @@ import {
   Bell,
   BookOpen,
   Check,
+  ChevronDown,
   ChevronRight,
   Circle,
   CircleDot,
@@ -30,6 +31,7 @@ import type {
   ItemStatus,
   Operation,
   PresentationDocument,
+  ReviewProvider,
   Resource,
   TaskSession,
   TaskStatus,
@@ -62,6 +64,54 @@ const taskStatuses: TaskStatus[] = [
 const closedGithubStates = new Set(["closed", "merged"]);
 const activeReviewStates = new Set(["queued", "running"]);
 const reviewHistoryStorageKey = "telemachus:review-history:v1";
+const reviewerPreferencesStorageKey = "telemachus:reviewers:v1";
+const reviewerLabels: Record<ReviewProvider, string> = {
+  codex: "Codex",
+  claude: "Claude",
+};
+
+type ReviewPane = "artifacts" | "prs";
+
+function savedReviewer(taskId: string, pane: ReviewPane): ReviewProvider {
+  try {
+    const stored = JSON.parse(
+      localStorage.getItem(reviewerPreferencesStorageKey) ?? "{}",
+    ) as Record<string, Partial<Record<ReviewPane, ReviewProvider>>>;
+    return stored[taskId]?.[pane] === "claude" ? "claude" : "codex";
+  } catch {
+    return "codex";
+  }
+}
+
+function storeReviewer(
+  taskId: string,
+  pane: ReviewPane,
+  reviewer: ReviewProvider,
+) {
+  let stored: Record<
+    string,
+    Partial<Record<ReviewPane, ReviewProvider>>
+  > = {};
+  try {
+    const parsed = JSON.parse(
+      localStorage.getItem(reviewerPreferencesStorageKey) ?? "{}",
+    );
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      stored = parsed;
+    }
+  } catch {
+    // Replace malformed preferences with a valid per-task map.
+  }
+  stored[taskId] = { ...stored[taskId], [pane]: reviewer };
+  try {
+    localStorage.setItem(
+      reviewerPreferencesStorageKey,
+      JSON.stringify(stored),
+    );
+  } catch {
+    // The in-memory selection still applies for the current app session.
+  }
+}
 
 function githubIssueIdentity(value: string): string | null {
   try {
@@ -239,7 +289,11 @@ export function TaskWorkspace({
   active: boolean;
   onDocument: (document: PresentationDocument) => void;
   onTaskChanged: () => void;
-  onLaunchReview: (resources: Resource[], issueUrl: string) => Promise<void>;
+  onLaunchReview: (
+    resources: Resource[],
+    issueUrl: string,
+    reviewer: ReviewProvider,
+  ) => Promise<void>;
   onCancelReview: (reviewRunId: string) => Promise<void>;
   presentationChange?: {
     id: string;
@@ -262,6 +316,11 @@ export function TaskWorkspace({
   const [planExpanded, setPlanExpanded] = useState(true);
   const [reviewingArtifacts, setReviewingArtifacts] = useState(false);
   const [reviewingPullRequests, setReviewingPullRequests] = useState(false);
+  const [artifactReviewer, setArtifactReviewer] = useState<ReviewProvider>(() =>
+    savedReviewer(task.id, "artifacts"),
+  );
+  const [pullRequestReviewer, setPullRequestReviewer] =
+    useState<ReviewProvider>(() => savedReviewer(task.id, "prs"));
   const [artifactReviewError, setArtifactReviewError] = useState("");
   const [pullRequestReviewError, setPullRequestReviewError] = useState("");
   const workspaceRef = useRef<HTMLDivElement>(null);
@@ -278,6 +337,15 @@ export function TaskWorkspace({
     startWidth: number;
   } | null>(null);
   documentRevisionRef.current = document.revision;
+
+  const chooseReviewer = (pane: ReviewPane, reviewer: ReviewProvider) => {
+    storeReviewer(task.id, pane, reviewer);
+    if (pane === "artifacts") {
+      setArtifactReviewer(reviewer);
+    } else {
+      setPullRequestReviewer(reviewer);
+    }
+  };
 
   useEffect(() => setLayout(task.layout), [task.layout]);
 
@@ -754,41 +822,53 @@ export function TaskWorkspace({
                   title="Artifacts"
                   count={artifacts.length}
                   action={
-                    <button
-                      type="button"
-                      className="panel-review-button"
-                      disabled={
-                        reviewingArtifacts ||
-                        reviewableArtifacts.length === 0 ||
-                        !issueIdentity
-                      }
-                      title={
-                        !issueIdentity
-                          ? "Add the task’s GitHub issue link before starting a review."
-                          : reviewableArtifacts.length === 0
-                            ? "All reviewable documents already have reviews running."
-                            : `Review ${reviewableArtifacts.length} document${
-                                reviewableArtifacts.length === 1 ? "" : "s"
-                              } with Codex`
-                      }
-                      aria-label="Review all eligible document artifacts with Codex"
-                      onClick={() => {
-                        setReviewingArtifacts(true);
-                        setArtifactReviewError("");
-                        onLaunchReview(reviewableArtifacts, issueUrl)
-                          .catch((error) =>
-                            setArtifactReviewError(
-                              error instanceof Error
-                                ? error.message
-                                : String(error),
-                            ),
+                    <span className="panel-review-controls">
+                      <button
+                        type="button"
+                        className="panel-review-button"
+                        disabled={
+                          reviewingArtifacts ||
+                          reviewableArtifacts.length === 0 ||
+                          !issueIdentity
+                        }
+                        title={
+                          !issueIdentity
+                            ? "Add the task’s GitHub issue link before starting a review."
+                            : reviewableArtifacts.length === 0
+                              ? "All reviewable documents already have reviews running."
+                              : `Review ${reviewableArtifacts.length} document${
+                                  reviewableArtifacts.length === 1 ? "" : "s"
+                                } with ${reviewerLabels[artifactReviewer]}`
+                        }
+                        aria-label={`Review all eligible document artifacts with ${reviewerLabels[artifactReviewer]}`}
+                        onClick={() => {
+                          setReviewingArtifacts(true);
+                          setArtifactReviewError("");
+                          onLaunchReview(
+                            reviewableArtifacts,
+                            issueUrl,
+                            artifactReviewer,
                           )
-                          .finally(() => setReviewingArtifacts(false));
-                      }}
-                    >
-                      <Sparkles size={11} />
-                      {reviewingArtifacts ? "Launching…" : "Review"}
-                    </button>
+                            .catch((error) =>
+                              setArtifactReviewError(
+                                error instanceof Error
+                                  ? error.message
+                                  : String(error),
+                              ),
+                            )
+                            .finally(() => setReviewingArtifacts(false));
+                        }}
+                      >
+                        <Sparkles size={11} />
+                        {reviewingArtifacts ? "Launching…" : "Review"}
+                      </button>
+                      <ReviewerSelector
+                        reviewer={artifactReviewer}
+                        onChange={(reviewer) =>
+                          chooseReviewer("artifacts", reviewer)
+                        }
+                      />
+                    </span>
                   }
                 />
                 {artifactReviewError && (
@@ -814,9 +894,15 @@ export function TaskWorkspace({
                           resource={artifact}
                           onReview={
                             artifact.type === "local_document" && issueIdentity
-                              ? () => onLaunchReview([artifact], issueUrl)
+                              ? () =>
+                                  onLaunchReview(
+                                    [artifact],
+                                    issueUrl,
+                                    artifactReviewer,
+                                  )
                               : undefined
                           }
+                          reviewer={artifactReviewer}
                           reviewDisabledReason={
                             artifact.type === "local_document" && !issueIdentity
                               ? "Add the task’s GitHub issue link before starting a review."
@@ -845,41 +931,55 @@ export function TaskWorkspace({
                   title="PRs"
                   count={openPullRequests.length}
                   action={
-                    <button
-                      type="button"
-                      className="panel-review-button"
-                      disabled={
-                        reviewingPullRequests ||
-                        reviewablePullRequests.length === 0 ||
-                        !issueIdentity
-                      }
-                      title={
-                        !issueIdentity
-                          ? "Add the task’s GitHub issue link before starting a review."
-                          : reviewablePullRequests.length === 0
-                            ? "All open pull requests already have reviews running."
-                            : `Review ${reviewablePullRequests.length} open pull request${
-                                reviewablePullRequests.length === 1 ? "" : "s"
-                              } with Codex`
-                      }
-                      aria-label="Review all open pull requests with Codex"
-                      onClick={() => {
-                        setReviewingPullRequests(true);
-                        setPullRequestReviewError("");
-                        onLaunchReview(reviewablePullRequests, issueUrl)
-                          .catch((error) =>
-                            setPullRequestReviewError(
-                              error instanceof Error
-                                ? error.message
-                                : String(error),
-                            ),
+                    <span className="panel-review-controls">
+                      <button
+                        type="button"
+                        className="panel-review-button"
+                        disabled={
+                          reviewingPullRequests ||
+                          reviewablePullRequests.length === 0 ||
+                          !issueIdentity
+                        }
+                        title={
+                          !issueIdentity
+                            ? "Add the task’s GitHub issue link before starting a review."
+                            : reviewablePullRequests.length === 0
+                              ? "All open pull requests already have reviews running."
+                              : `Review ${reviewablePullRequests.length} open pull request${
+                                  reviewablePullRequests.length === 1 ? "" : "s"
+                                } with ${reviewerLabels[pullRequestReviewer]}`
+                        }
+                        aria-label={`Review all open pull requests with ${reviewerLabels[pullRequestReviewer]}`}
+                        onClick={() => {
+                          setReviewingPullRequests(true);
+                          setPullRequestReviewError("");
+                          onLaunchReview(
+                            reviewablePullRequests,
+                            issueUrl,
+                            pullRequestReviewer,
                           )
-                          .finally(() => setReviewingPullRequests(false));
-                      }}
-                    >
-                      <Sparkles size={11} />
-                      {reviewingPullRequests ? "Launching…" : "Review"}
-                    </button>
+                            .catch((error) =>
+                              setPullRequestReviewError(
+                                error instanceof Error
+                                  ? error.message
+                                  : String(error),
+                              ),
+                            )
+                            .finally(() =>
+                              setReviewingPullRequests(false),
+                            );
+                        }}
+                      >
+                        <Sparkles size={11} />
+                        {reviewingPullRequests ? "Launching…" : "Review"}
+                      </button>
+                      <ReviewerSelector
+                        reviewer={pullRequestReviewer}
+                        onChange={(reviewer) =>
+                          chooseReviewer("prs", reviewer)
+                        }
+                      />
+                    </span>
                   }
                 />
                 {pullRequestReviewError && (
@@ -902,9 +1002,15 @@ export function TaskWorkspace({
                         resource={pullRequest}
                         onReview={
                           issueIdentity
-                            ? () => onLaunchReview([pullRequest], issueUrl)
+                            ? () =>
+                                onLaunchReview(
+                                  [pullRequest],
+                                  issueUrl,
+                                  pullRequestReviewer,
+                                )
                             : undefined
                         }
+                        reviewer={pullRequestReviewer}
                         reviewDisabledReason={
                           !issueIdentity
                             ? "Add the task’s GitHub issue link before starting a review."
@@ -1014,6 +1120,76 @@ export function TaskWorkspace({
 
       <Scratchpad taskId={task.id} />
     </div>
+  );
+}
+
+function ReviewerSelector({
+  reviewer,
+  onChange,
+}: {
+  reviewer: ReviewProvider;
+  onChange: (reviewer: ReviewProvider) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const selectorRef = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeIfOutside = (event: PointerEvent) => {
+      if (!selectorRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", closeIfOutside);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeIfOutside);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  return (
+    <span className="reviewer-selector" ref={selectorRef}>
+      <button
+        type="button"
+        className="reviewer-selector-toggle"
+        aria-label={`Choose reviewer. Current reviewer: ${reviewerLabels[reviewer]}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={`Reviewer: ${reviewerLabels[reviewer]}`}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <ChevronDown size={11} />
+      </button>
+      {open && (
+        <span
+          className="reviewer-selector-menu"
+          role="menu"
+          aria-label="Reviewer"
+        >
+          {(["codex", "claude"] as ReviewProvider[]).map((option) => (
+            <button
+              key={option}
+              type="button"
+              role="menuitemradio"
+              aria-checked={reviewer === option}
+              onClick={() => {
+                onChange(option);
+                setOpen(false);
+              }}
+            >
+              <span className="reviewer-selector-check">
+                {reviewer === option && <Check size={11} />}
+              </span>
+              {reviewerLabels[option]}
+            </button>
+          ))}
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -1213,12 +1389,14 @@ function ResourceCard({ resource }: { resource: Resource }) {
 function ArtifactCard({
   taskId,
   resource,
+  reviewer,
   onReview,
   onCancelReview,
   reviewDisabledReason,
 }: {
   taskId: string;
   resource: Resource;
+  reviewer: ReviewProvider;
   onReview?: () => Promise<void>;
   onCancelReview?: (reviewRunId: string) => Promise<void>;
   reviewDisabledReason?: string;
@@ -1304,8 +1482,11 @@ function ArtifactCard({
             type="button"
             className="artifact-review-button"
             disabled={reviewInFlight || !onReview}
-            title={reviewDisabledReason ?? "Launch a Codex review task"}
-            aria-label={`Review ${resource.label} with Codex`}
+            title={
+              reviewDisabledReason ??
+              `Launch a ${reviewerLabels[reviewer]} review task`
+            }
+            aria-label={`Review ${resource.label} with ${reviewerLabels[reviewer]}`}
             onClick={() => {
               if (!onReview) return;
               setReviewing(true);
@@ -1339,7 +1520,7 @@ function ArtifactCard({
                 className="artifact-cancel-review"
                 disabled={cancelling || !onCancelReview || !reviewTaskId}
                 aria-label={`Cancel review of ${resource.label}`}
-                title="Cancel this Codex review run"
+                title="Cancel this review run"
                 onClick={() => {
                   if (!onCancelReview || !reviewTaskId) return;
                   setCancelling(true);

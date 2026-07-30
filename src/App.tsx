@@ -13,13 +13,13 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   applyOperation,
-  cancelCodexArtifactReview,
+  cancelArtifactReview,
   closeTask,
   createTask,
   getActiveTask,
   getDocument,
   isTauri,
-  launchCodexArtifactReview,
+  launchArtifactReview,
   listTasks,
   onPresentationUpdated,
   setActiveTask,
@@ -27,6 +27,7 @@ import {
 import type {
   PresentationDocument,
   PresentationUpdate,
+  ReviewProvider,
   Resource,
   TaskSession,
 } from "./types";
@@ -287,11 +288,17 @@ export function App() {
   );
 
   const launchReview = useCallback(
-    async (sourceTaskId: string, resources: Resource[], issueUrl: string) => {
-      await launchCodexArtifactReview(
+    async (
+      sourceTaskId: string,
+      resources: Resource[],
+      issueUrl: string,
+      reviewer: ReviewProvider,
+    ) => {
+      await launchArtifactReview(
         sourceTaskId,
         resources,
         issueUrl,
+        reviewer,
       );
       await loadDocument(sourceTaskId);
     },
@@ -300,7 +307,7 @@ export function App() {
 
   const cancelReview = useCallback(
     async (sourceTaskId: string, reviewRunId: string) => {
-      const next = await cancelCodexArtifactReview(sourceTaskId, reviewRunId);
+      const next = await cancelArtifactReview(sourceTaskId, reviewRunId);
       setDocuments((current) => ({
         ...current,
         [sourceTaskId]: next,
@@ -650,8 +657,8 @@ export function App() {
                 setDocuments((current) => ({ ...current, [task.id]: next }))
               }
               onTaskChanged={() => reloadTasks().catch(console.error)}
-              onLaunchReview={(resources, issueUrl) =>
-                launchReview(task.id, resources, issueUrl)
+              onLaunchReview={(resources, issueUrl, reviewer) =>
+                launchReview(task.id, resources, issueUrl, reviewer)
               }
               onCancelReview={(reviewRunId) =>
                 cancelReview(task.id, reviewRunId)

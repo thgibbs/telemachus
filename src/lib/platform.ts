@@ -8,6 +8,7 @@ import type {
   PresentationUpdate,
   PresentedTask,
   Question,
+  ReviewProvider,
   Resource,
   ScratchpadState,
   TaskSummary,
@@ -415,13 +416,14 @@ export async function discoverOpenGithubPullRequests(
   return null;
 }
 
-export async function launchCodexArtifactReview(
+export async function launchArtifactReview(
   sourceTaskId: string,
   resources: Resource[],
   issueUrl: string,
+  reviewer: ReviewProvider,
 ): Promise<string> {
   if (isTauri()) {
-    return invoke("launch_codex_artifact_review", {
+    return invoke("launch_artifact_review", {
       sourceTaskId,
       prUrls: resources
         .filter((resource) => resource.type === "github_pr")
@@ -430,25 +432,26 @@ export async function launchCodexArtifactReview(
         .filter((resource) => resource.type === "local_document")
         .map((resource) => resource.path_or_url),
       issueUrl,
+      reviewer,
     });
   }
   throw new Error(
-    "Desktop host required. Start Telemachus with `npm run desktop` to launch a Codex review.",
+    "Desktop host required. Start Telemachus with `npm run desktop` to launch a review.",
   );
 }
 
-export async function cancelCodexArtifactReview(
+export async function cancelArtifactReview(
   sourceTaskId: string,
   reviewRunId: string,
 ): Promise<PresentationDocument> {
   if (isTauri()) {
-    return invoke("cancel_codex_artifact_review", {
+    return invoke("cancel_artifact_review", {
       sourceTaskId,
       reviewRunId,
     });
   }
   throw new Error(
-    "Desktop host required. Start Telemachus with `npm run desktop` to cancel a Codex review.",
+    "Desktop host required. Start Telemachus with `npm run desktop` to cancel a review.",
   );
 }
 

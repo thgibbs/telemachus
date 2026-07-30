@@ -40,6 +40,22 @@ const CODEX_REVIEW_REASONING_CONFIG: &str = "model_reasoning_effort=high";
 const AGENT_UI_CLI: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../bin/agent-ui.mjs"));
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ReviewProvider {
+    Codex,
+    Claude,
+}
+
+impl ReviewProvider {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskHeader {
@@ -2073,7 +2089,7 @@ fn github_issue_reference(target: &str) -> Result<GitHubIssueReference, String> 
     })
 }
 
-fn codex_review_prompt(
+fn review_prompt(
     pull_requests: &[GitHubPullRequestReference],
     documents: &[LocalDocumentReviewReference],
     issue: &GitHubIssueReference,
@@ -2162,6 +2178,16 @@ fn codex_review_arguments(prompt: String) -> Vec<String> {
     ]
 }
 
+fn claude_review_arguments(prompt: String) -> Vec<String> {
+    vec![
+        "-p".into(),
+        "--no-session-persistence".into(),
+        "--allowedTools".into(),
+        "Bash,Read,Grep,Glob".into(),
+        prompt,
+    ]
+}
+
 fn executable_on_path(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|value| {
         std::env::split_paths(&value)
@@ -2205,6 +2231,47 @@ fn locate_codex_cli() -> Result<PathBuf, String> {
         }
     }
     Err("codex_cli_not_found".into())
+}
+
+fn locate_claude_cli() -> Result<PathBuf, String> {
+    if let Some(path) = executable_on_path("claude") {
+        return Ok(path);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        for relative in [
+            ".local/bin/claude",
+            ".npm-global/bin/claude",
+            ".claude/local/claude",
+        ] {
+            let candidate = PathBuf::from(&home).join(relative);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    for candidate in ["/opt/homebrew/bin/claude", "/usr/local/bin/claude"] {
+        let path = PathBuf::from(candidate);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    if Path::new(&shell).is_absolute() && Path::new(&shell).is_file() {
+        if let Ok(output) = ProcessCommand::new(shell)
+            .args(["-lic", "command -v claude"])
+            .output()
+        {
+            if output.status.success() {
+                for line in String::from_utf8_lossy(&output.stdout).lines().rev() {
+                    let candidate = PathBuf::from(line.trim());
+                    if candidate.is_absolute() && candidate.is_file() {
+                        return Ok(candidate);
+                    }
+                }
+            }
+        }
+    }
+    Err("claude_cli_not_found".into())
 }
 
 fn create_codex_review_workspace() -> Result<PathBuf, String> {
@@ -2567,10 +2634,11 @@ fn finish_active_review(state: &AppState, review_run_id: &str, review_workspace:
     let _ = std::fs::remove_dir_all(review_workspace);
 }
 
-fn watch_codex_review(
+fn watch_review(
     state: Arc<AppState>,
     child: Arc<Mutex<Child>>,
     cancel_requested: Arc<AtomicBool>,
+    reviewer: ReviewProvider,
     source_task_id: String,
     review_run_id: String,
     pull_requests: Vec<GitHubPullRequestReference>,
@@ -2613,7 +2681,10 @@ fn watch_codex_review(
                     &targets,
                     "failed",
                     &HashMap::new(),
-                    Some("Codex review exited before posting its review."),
+                    Some(&format!(
+                        "{} review exited before posting its review.",
+                        reviewer.label()
+                    )),
                 );
                 let _ = update_source_review_state(
                     &state,
@@ -2683,15 +2754,15 @@ fn watch_codex_review(
 }
 
 #[tauri::command]
-fn cancel_codex_artifact_review(
+fn cancel_artifact_review(
     state: tauri::State<'_, Arc<AppState>>,
     source_task_id: String,
     review_run_id: String,
 ) -> Result<PresentationDocument, String> {
-    cancel_codex_artifact_review_core(&state, source_task_id, review_run_id)
+    cancel_artifact_review_core(&state, source_task_id, review_run_id)
 }
 
-fn cancel_codex_artifact_review_core(
+fn cancel_artifact_review_core(
     state: &AppState,
     source_task_id: String,
     review_run_id: String,
@@ -2728,7 +2799,7 @@ fn cancel_codex_artifact_review_core(
         &review.targets,
         "cancelled",
         &HashMap::new(),
-        Some("Codex review cancelled by the user."),
+        Some("Review cancelled by the user."),
     );
     update_source_review_state(
         state,
@@ -2741,22 +2812,31 @@ fn cancel_codex_artifact_review_core(
 }
 
 #[tauri::command]
-fn launch_codex_artifact_review(
+fn launch_artifact_review(
     state: tauri::State<'_, Arc<AppState>>,
     source_task_id: String,
     pr_urls: Vec<String>,
     document_paths: Vec<String>,
     issue_url: String,
+    reviewer: ReviewProvider,
 ) -> Result<String, String> {
-    launch_codex_artifact_review_core(&state, source_task_id, pr_urls, document_paths, issue_url)
+    launch_artifact_review_core(
+        &state,
+        source_task_id,
+        pr_urls,
+        document_paths,
+        issue_url,
+        reviewer,
+    )
 }
 
-fn launch_codex_artifact_review_core(
+fn launch_artifact_review_core(
     state: &Arc<AppState>,
     source_task_id: String,
     pr_urls: Vec<String>,
     document_paths: Vec<String>,
     issue_url: String,
+    reviewer: ReviewProvider,
 ) -> Result<String, String> {
     validate_id(&source_task_id)?;
     let target_count = pr_urls.len() + document_paths.len();
@@ -2820,7 +2900,10 @@ fn launch_codex_artifact_review_core(
         });
     }
 
-    let codex_path = locate_codex_cli()?;
+    let reviewer_path = match reviewer {
+        ReviewProvider::Codex => locate_codex_cli()?,
+        ReviewProvider::Claude => locate_claude_cli()?,
+    };
     let review_workspace = create_codex_review_workspace()?;
     let review_run_id = Uuid::new_v4().to_string();
     let timestamp = now();
@@ -2845,9 +2928,13 @@ fn launch_codex_artifact_review_core(
         return Err(error);
     }
 
-    let prompt = codex_review_prompt(&pull_requests, &documents, &requested_issue, &issue_url);
-    let child = match ProcessCommand::new(codex_path)
-        .args(codex_review_arguments(prompt))
+    let prompt = review_prompt(&pull_requests, &documents, &requested_issue, &issue_url);
+    let reviewer_arguments = match reviewer {
+        ReviewProvider::Codex => codex_review_arguments(prompt),
+        ReviewProvider::Claude => claude_review_arguments(prompt),
+    };
+    let child = match ProcessCommand::new(reviewer_path)
+        .args(reviewer_arguments)
         .current_dir(&review_workspace)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -2861,7 +2948,10 @@ fn launch_codex_artifact_review_core(
                 &targets,
                 "failed",
                 &HashMap::new(),
-                Some("Codex review could not be started."),
+                Some(&format!(
+                    "{} review could not be started.",
+                    reviewer.label()
+                )),
             );
             let _ = update_source_review_state(
                 state,
@@ -2901,10 +2991,11 @@ fn launch_codex_artifact_review_core(
         finish_active_review(state, &review_run_id, &review_workspace);
         return Err(error);
     }
-    watch_codex_review(
+    watch_review(
         state.clone(),
         child,
         cancel_requested,
+        reviewer,
         source_task_id,
         review_run_id.clone(),
         pull_requests,
@@ -3332,8 +3423,8 @@ pub fn run() {
             open_artifact,
             get_closed_github_pull_requests,
             discover_open_github_pull_requests,
-            launch_codex_artifact_review,
-            cancel_codex_artifact_review,
+            launch_artifact_review,
+            cancel_artifact_review,
             get_bridge_info
         ])
         .run(tauri::generate_context!())
@@ -3436,7 +3527,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_review_launch_is_issue_grounded_and_uses_sol_high() {
+    fn reviewer_launch_is_issue_grounded_and_uses_expected_cli_modes() {
         let issue = github_issue_reference("https://github.com/openai/codex/issues/456").unwrap();
         let pull_requests = vec![
             github_pull_request_reference("https://github.com/openai/codex/pull/123").unwrap(),
@@ -3446,7 +3537,7 @@ mod tests {
             source_path: "/tmp/plan.md".into(),
             canonical_path: PathBuf::from("/tmp/plan.md"),
         }];
-        let prompt = codex_review_prompt(
+        let prompt = review_prompt(
             &pull_requests,
             &documents,
             &issue,
@@ -3488,6 +3579,26 @@ mod tests {
         assert!(!arguments
             .iter()
             .any(|argument| argument == "--dangerously-bypass-approvals-and-sandbox"));
+
+        let claude_arguments = claude_review_arguments("Review this".into());
+        assert_eq!(claude_arguments.first().map(String::as_str), Some("-p"));
+        assert!(claude_arguments
+            .iter()
+            .any(|argument| argument == "--no-session-persistence"));
+        assert!(claude_arguments
+            .windows(2)
+            .any(|pair| pair == ["--allowedTools", "Bash,Read,Grep,Glob"]));
+        assert!(!claude_arguments
+            .iter()
+            .any(|argument| argument == "--dangerously-skip-permissions"));
+        assert_eq!(
+            serde_json::from_str::<ReviewProvider>("\"codex\"").unwrap(),
+            ReviewProvider::Codex
+        );
+        assert_eq!(
+            serde_json::from_str::<ReviewProvider>("\"claude\"").unwrap(),
+            ReviewProvider::Claude
+        );
 
         let review_path = std::env::temp_dir()
             .join("agent-ui-codex-reviews")
@@ -3669,8 +3780,7 @@ mod tests {
             },
         );
 
-        let document =
-            cancel_codex_artifact_review_core(&state, task.id, review_run_id.into()).unwrap();
+        let document = cancel_artifact_review_core(&state, task.id, review_run_id.into()).unwrap();
         assert!(cancel_requested.load(Ordering::SeqCst));
         assert_eq!(
             document.resources[0]
@@ -3684,7 +3794,7 @@ mod tests {
                 .metadata
                 .get("review_error")
                 .map(String::as_str),
-            Some("Codex review cancelled by the user.")
+            Some("Review cancelled by the user.")
         );
 
         state.active_reviews.lock().unwrap().remove(review_run_id);

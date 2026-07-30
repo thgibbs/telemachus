@@ -21,7 +21,7 @@ Telemachus provides:
 - one durable task tab per live terminal session;
 - agent-maintained Status, Plan, Alerts, Artifacts, and PR sections;
 - questions and actions collected in a human To do section;
-- background Codex reviews for pull requests and local documents;
+- background Codex or Claude reviews for pull requests and local documents;
 - links from task context to local files, web documents, GitHub issues, and PRs;
 - accessible text scaling and hover magnification; and
 - a private human scratchpad outside the agent integration.
@@ -43,17 +43,25 @@ instructions that match the version of Telemachus you are running.
 - Node.js 20+
 - Rust 1.88+
 - macOS developer tools
-- [Codex CLI](https://developers.openai.com/codex/cli), installed and
-  authenticated
+- GitHub CLI (`gh`), installed and authenticated
+- At least one reviewer CLI: [Codex CLI](https://developers.openai.com/codex/cli)
+  or Claude Code, installed and authenticated
 
-Telemachus uses `codex exec` for artifact reviews. The Codex CLI is a required
-system prerequisite and is not installed by this project's npm dependencies.
+Each task tab defaults both review panes to Codex. Install Codex, Claude Code,
+or both depending on which reviewers you intend to select. These CLIs are
+system prerequisites and are not installed by this project's npm dependencies.
 
 ```bash
 npm install --global @openai/codex
 codex login
 codex --version
 codex login status
+
+npm install --global @anthropic-ai/claude-code
+claude --version
+
+gh auth login
+gh auth status
 ```
 
 ## Run it
@@ -141,16 +149,22 @@ Closed PRs and failed lookups are not added.
 
 Every open PR and local-document artifact has a **Review** button. The
 Artifacts and PRs headings also provide bulk review actions for their eligible
-items. Reviews run non-interactively in the background with `codex exec`, using
-`gpt-5.6-sol` at high reasoning in an isolated temporary Git workspace; they do
-not create or replace a terminal tab. Codex receives the linked GitHub issue
-and the selected artifacts. PR reviews are submitted to their pull requests,
-while local-document findings are posted as a comment on the linked issue.
+items. An arrow-only menu beside each heading's Review button selects Codex or
+Claude for that pane in that task tab. Both panes default to Codex and remember
+their choices independently; newly added documents and PRs automatically use
+their containing pane's reviewer.
+
+Reviews run non-interactively in an isolated temporary Git workspace and do not
+create or replace a terminal tab. Codex uses `codex exec` with `gpt-5.6-sol` at
+high reasoning. Claude runs headlessly with `claude -p`. The selected reviewer
+receives the linked GitHub issue and artifacts. PR reviews are submitted to
+their pull requests, while local-document findings are posted as a comment on
+the linked issue.
 Cards show **Reviewing** while a run is active and link directly to
 **View review** after it posts. The action then becomes **Re-review**, with
 completed re-reviews counted on the card. A run that exits without a newly
 posted result is shown as failed and can be retried. Active reviews can be
-cancelled from their cards; Telemachus terminates the background Codex process
+cancelled from their cards; Telemachus terminates the background reviewer
 and also cleans up active review processes when a task or the app closes.
 
 ![Telemachus artifacts and pull requests with review controls and live review states](images/screenshot2.png)
