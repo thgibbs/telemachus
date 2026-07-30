@@ -2182,9 +2182,9 @@ fn claude_review_arguments(prompt: String) -> Vec<String> {
     vec![
         "-p".into(),
         "--no-session-persistence".into(),
+        prompt,
         "--allowedTools".into(),
         "Bash,Read,Grep,Glob".into(),
-        prompt,
     ]
 }
 
@@ -2735,8 +2735,10 @@ fn watch_review(
                             },
                             review_url,
                             error: (!review_urls.contains_key(target)).then(|| {
-                                "Codex finished, but no newly posted GitHub review was found."
-                                    .into()
+                                format!(
+                                    "{} finished, but no newly posted GitHub review was found.",
+                                    reviewer.label()
+                                )
                             }),
                         },
                     )
@@ -3588,6 +3590,15 @@ mod tests {
         assert!(claude_arguments
             .windows(2)
             .any(|pair| pair == ["--allowedTools", "Bash,Read,Grep,Glob"]));
+        assert!(
+            claude_arguments
+                .iter()
+                .position(|argument| argument == "Review this")
+                < claude_arguments
+                    .iter()
+                    .position(|argument| argument == "--allowedTools"),
+            "Claude's variadic --allowedTools option must come after the prompt"
+        );
         assert!(!claude_arguments
             .iter()
             .any(|argument| argument == "--dangerously-skip-permissions"));
