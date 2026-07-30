@@ -200,12 +200,23 @@ const help = await run("bin/agent-ui.mjs", ["help"]);
 assert.match(help.stdout, /No MCP setup is required/);
 
 const instructions = await run("bin/agent-ui.mjs", ["instructions"]);
-assert.match(instructions.stdout, /^# Using Telemachus as an agent/);
-assert.match(instructions.stdout, /## Status\n/);
-assert.match(instructions.stdout, /Apply the coffee test/);
-assert.match(instructions.stdout, /## Alerts vs\. human to dos/);
-assert.match(instructions.stdout, /### Pull requests/);
-assert.match(instructions.stdout, /## Recommended completion update/);
+assert.match(
+  instructions.stdout,
+  /^I am interacting with you through Agent UI\./,
+);
+assert.ok(Buffer.byteLength(instructions.stdout) >= 2 * 1024);
+assert.ok(Buffer.byteLength(instructions.stdout) <= 3 * 1024);
+assert.match(instructions.stdout, /run `agent-ui help`/);
+assert.match(instructions.stdout, /## Write short\n/);
+assert.match(instructions.stdout, /## Plan = the work, not your process\n/);
+assert.match(instructions.stdout, /## Alerts vs\. to dos\n/);
+assert.doesNotMatch(instructions.stdout, /## Task header\n/);
+
+const detailedHelp = await run("bin/agent-ui.mjs", ["help"]);
+assert.match(detailedHelp.stdout, /# Detailed Agent UI workflow/);
+assert.match(detailedHelp.stdout, /agent-ui alert upsert/);
+assert.match(detailedHelp.stdout, /Task statuses:/);
+assert.match(detailedHelp.stdout, /Artifact statuses:/);
 
 const doctor = await run("bin/agent-ui.mjs", ["doctor", "--compact"]);
 assert.equal(JSON.parse(doctor.stdout).task_id, taskId);

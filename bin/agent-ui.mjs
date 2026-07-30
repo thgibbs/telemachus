@@ -4,7 +4,60 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 const argv = process.argv.slice(2);
-const AGENT_INSTRUCTIONS = `# Using Telemachus as an agent
+const AGENT_INSTRUCTIONS = `I am interacting with you through Agent UI. Keep the task screen current with \`agent-ui\`.
+
+Task ID, bridge address, and credentials are injected automatically — do not configure MCP.
+
+Start with \`agent-ui doctor\`, then \`agent-ui context --compact\`.
+**For syntax, flags, examples, and valid enum values, run \`agent-ui help\` — consult it rather than guessing.**
+Commands: \`task set|status\`, \`plan add|update|remove\`, \`summary set\`, \`alert raise|upsert|clear\`,
+\`artifact add|update|remove\`, \`todo add|ask|get\`, \`publish --stdin\`.
+
+## Write short
+
+The screen is small and does not scroll gracefully. A plan item is a stage name plus one
+outcome line. A status message is a phrase, not a sentence. An alert or todo is one line.
+Say the thing that changes what the human does, then stop. Reasoning belongs in the
+conversation, not on the screen.
+
+## The loop
+
+Set the title and \`working\` status. Post a short plan with stable IDs. Update items as stages
+land. Raise alerts for real risks. Add todos when the human owes something. Finish with a
+summary and an honest final status — report blocked or failed as such; never mark incomplete
+work \`completed\`.
+
+## Plan = the work, not your process
+
+One item per stage of the thing being built. "Read the issue", "search the codebase", and
+"write the file" are how you complete a stage, not stages themselves. The title is the stage
+name (\`Phase 2\`); the detail is one line ending in that stage's completion condition. If a
+written plan already exists, mirror its structure so the two read the same.
+
+## Alerts vs. to dos
+
+The test is whether the human owes something.
+
+- **Alert** — you are telling them. Findings, risks, caveats. They read it and move on.
+- **Todo** — they must act or answer. Deploy, merge, approve, choose, or supply a fact.
+
+Never put a decision request in an alert — it gets read and forgotten. The To do pane is where
+the human looks for what they owe you. An observation with no decision attached is an alert,
+not a todo. Make a question blocking only when no useful work can continue without the answer,
+and never use one to dodge a safe, reversible engineering call.
+
+## Details worth knowing
+
+- Reuse stable IDs (\`phase-1\`, \`release-pr\`); never mint a new one just to update an item.
+- The task's issue goes in \`task set --issue-url\`, not Artifacts.
+- Artifacts are durable references — plans, design docs, open PRs, generated reports — not
+  every file touched along the way.
+- Status is a handoff: someone back from coffee reads two lines and can continue.
+- Exit 2 = another writer moved the screen; re-read \`context\`, reconcile, retry.
+  Exit 3 = blocking todo timed out. Exit 4 = bridge or authentication is down.
+`;
+
+const AGENT_HELP_DETAILS = `# Detailed Agent UI workflow
 
 Telemachus gives Claude, Codex, and other terminal agents one command for keeping
 the task screen current:
@@ -1525,6 +1578,7 @@ Write summary, alerts, and artifacts:
   agent-ui summary set --headline TEXT --body-file summary.md
   agent-ui summary clear
   agent-ui alert raise ID TITLE [--severity info|warning|critical] [--message TEXT]
+  agent-ui alert upsert ID --title TITLE [--severity info|warning|critical] [--message TEXT]
   agent-ui alert clear ID
   agent-ui artifact list
   agent-ui artifact add ID LABEL TARGET [--type local_document|web_document|github_pr|path|url|note] [--meta KEY=VALUE]
@@ -1567,6 +1621,9 @@ The app injects AGENT_UI_ENDPOINT, AGENT_UI_TASK_ID, AGENT_UI_TOKEN,
 AGENT_UI_PROTOCOL_VERSION, AGENT_UI_SOURCE, and AGENT_UI_CLI into each terminal.
 No MCP setup is required.
 `);
+  process.stdout.write(
+    `\nDetailed behavior, examples, and enum values:\n\n${AGENT_HELP_DETAILS}`,
+  );
 }
 
 async function main() {

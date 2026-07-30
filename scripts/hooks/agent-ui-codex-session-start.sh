@@ -26,6 +26,6 @@ instructions=$("$agent_ui_cli" instructions 2>/dev/null) || exit 0
 jq -n --arg c "$instructions" '{
   hookSpecificOutput: {
     hookEventName: "SessionStart",
-    additionalContext: ("I am interacting with you through Agent UI. Follow these Agent UI instructions and keep the screen updated:\n\n" + $c)
+    additionalContext: $c
   }
 }'

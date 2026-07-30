@@ -34,10 +34,11 @@ When you launch Claude or Codex in a Telemachus terminal, tell it:
 > Before doing any work, run `agent-ui instructions` and follow the guidance it
 > prints. Keep the Telemachus task screen current throughout this session.
 
-Do this at the beginning of every session. `agent-ui instructions` prints the
-current, built-in guide for using the Status, Plan, Alerts, To do, Artifacts,
-and PR sections. Keeping the guidance in the CLI means the agent receives the
-instructions that match the version of Telemachus you are running.
+Do this at the beginning of every session. `agent-ui instructions` prints a
+compact 2–3 KB operating guide for using the Status, Plan, Alerts, To do,
+Artifacts, and PR sections. Detailed command syntax, examples, and enum values
+live in `agent-ui help`. Keeping both in the CLI means the agent receives
+guidance that matches the version of Telemachus you are running.
 
 ## Prerequisites
 
