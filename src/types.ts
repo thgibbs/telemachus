@@ -8,6 +8,7 @@ export type TaskStatus =
   | "cancelled";
 
 export type ReviewProvider = "codex" | "claude";
+export type AgentProvider = "codex" | "claude";
 
 export type ItemStatus =
   | "pending"
@@ -39,6 +40,16 @@ export interface TaskHeader {
   source: string;
   status: TaskStatus;
   status_message: string;
+  agent_session?: AgentSession | null;
+}
+
+export interface AgentSession {
+  provider: AgentProvider;
+  session_id: string;
+  cwd: string;
+  model: string;
+  start_source: string;
+  updated_at: string;
 }
 
 export interface PresentedTask {
@@ -134,6 +145,7 @@ export interface Operation {
   op_type:
     | "set_task"
     | "set_task_status"
+    | "set_agent_session"
     | "replace_tasks"
     | "upsert_task"
     | "ask_user"
@@ -189,6 +201,7 @@ export const emptyDocument = (taskId: string): PresentationDocument => ({
     source: "human",
     status: "idle",
     status_message: "",
+    agent_session: null,
   },
   tasks: [],
   questions: [],

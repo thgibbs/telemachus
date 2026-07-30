@@ -19,6 +19,7 @@ to the agent.
 Telemachus provides:
 
 - one durable task tab per live terminal session;
+- resumable Claude or Codex session IDs captured in each task header;
 - agent-maintained Status, Plan, Alerts, Artifacts, and PR sections;
 - questions and actions collected in a human To do section;
 - background Codex or Claude reviews for pull requests and local documents;
@@ -238,6 +239,19 @@ Telemachus injects these values into every child terminal:
 
 The token is passed directly to child processes and is not written to shell
 history or persisted by the application.
+
+Claude and Codex `SessionStart` hooks can pipe their JSON input to:
+
+```bash
+agent-ui session attach --provider claude --stdin --output quiet
+agent-ui session attach --provider codex --stdin --output quiet
+```
+
+The command is task-scoped and records the provider, session ID, working
+directory, and model. Telemachus shows that session in the task header; clicking
+it copies the complete `claude --resume ...` or `codex resume ...` command.
+Hooks should skip the command when `AGENT_UI_TASK_ID` is unset so normal
+terminal sessions remain unaffected.
 
 ## Private scratchpad
 

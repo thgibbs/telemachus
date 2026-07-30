@@ -56,6 +56,27 @@ impl ReviewProvider {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentProvider {
+    Codex,
+    Claude,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSession {
+    pub provider: AgentProvider,
+    pub session_id: String,
+    #[serde(default)]
+    pub cwd: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub start_source: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskHeader {
@@ -70,6 +91,8 @@ pub struct TaskHeader {
     pub status: TaskStatus,
     #[serde(default)]
     pub status_message: String,
+    #[serde(default)]
+    pub agent_session: Option<AgentSession>,
 }
 
 fn human_source() -> String {
@@ -260,6 +283,7 @@ impl Default for PresentationDocument {
                 source: "human".into(),
                 status: TaskStatus::Idle,
                 status_message: String::new(),
+                agent_session: None,
             },
             tasks: Vec::new(),
             questions: Vec::new(),
@@ -859,7 +883,9 @@ fn apply_to_document(
 ) -> Result<(), String> {
     match op_type {
         "set_task" => {
+            let agent_session = document.header.agent_session.clone();
             document.header = serde_json::from_value(payload).map_err(payload_error)?;
+            document.header.agent_session = agent_session;
         }
         "set_task_status" => {
             #[derive(Deserialize)]
@@ -872,6 +898,29 @@ fn apply_to_document(
             let payload: Payload = serde_json::from_value(payload).map_err(payload_error)?;
             document.header.status = payload.status;
             document.header.status_message = payload.status_message;
+        }
+        "set_agent_session" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Payload {
+                provider: AgentProvider,
+                session_id: String,
+                #[serde(default)]
+                cwd: String,
+                #[serde(default)]
+                model: String,
+                #[serde(default)]
+                start_source: String,
+            }
+            let payload: Payload = serde_json::from_value(payload).map_err(payload_error)?;
+            document.header.agent_session = Some(AgentSession {
+                provider: payload.provider,
+                session_id: payload.session_id,
+                cwd: payload.cwd,
+                model: payload.model,
+                start_source: payload.start_source,
+                updated_at: now(),
+            });
         }
         "replace_tasks" => {
             #[derive(Deserialize)]
@@ -992,6 +1041,20 @@ fn validate_document(document: &PresentationDocument) -> Result<(), String> {
         &document.header.status_message,
         2048,
     )?;
+    if let Some(session) = &document.header.agent_session {
+        validate_string("header.agent_session.session_id", &session.session_id, 512)?;
+        if session.session_id.trim().is_empty() {
+            return Err("agent_session_id_required".into());
+        }
+        validate_string("header.agent_session.cwd", &session.cwd, 8192)?;
+        validate_string("header.agent_session.model", &session.model, 512)?;
+        validate_string(
+            "header.agent_session.start_source",
+            &session.start_source,
+            64,
+        )?;
+        validate_string("header.agent_session.updated_at", &session.updated_at, 128)?;
+    }
     validate_collection("tasks", &document.tasks)?;
     validate_collection("questions", &document.questions)?;
     validate_collection("summary.sections", &document.summary.sections)?;
@@ -3876,6 +3939,57 @@ mod tests {
             .unwrap()
             .tasks
             .is_empty());
+    }
+
+    #[test]
+    fn agent_session_is_persisted_and_preserved_by_header_edits() {
+        let state = AppState::in_memory();
+        let task = create_task_core(&state, None).unwrap();
+        let document = apply_operation_core(
+            &state,
+            operation(
+                &task.id,
+                "set_agent_session",
+                json!({
+                    "provider": "claude",
+                    "session_id": "session-123",
+                    "cwd": "/tmp/project",
+                    "model": "claude-opus",
+                    "start_source": "startup"
+                }),
+            ),
+        )
+        .unwrap();
+        let session = document.header.agent_session.unwrap();
+        assert_eq!(session.provider, AgentProvider::Claude);
+        assert_eq!(session.session_id, "session-123");
+        assert_eq!(session.cwd, "/tmp/project");
+
+        let document = apply_operation_core(
+            &state,
+            operation(
+                &task.id,
+                "set_task",
+                json!({
+                    "title": "Renamed task",
+                    "description": "",
+                    "issue_url": "",
+                    "source": "human",
+                    "status": "working",
+                    "status_message": ""
+                }),
+            ),
+        )
+        .unwrap();
+        assert_eq!(document.header.title, "Renamed task");
+        assert_eq!(
+            document
+                .header
+                .agent_session
+                .as_ref()
+                .map(|session| session.session_id.as_str()),
+            Some("session-123")
+        );
     }
 
     #[test]

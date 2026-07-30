@@ -2,6 +2,7 @@ import {
   AlertOctagon,
   AlertTriangle,
   Bell,
+  Bot,
   BookOpen,
   Check,
   ChevronDown,
@@ -27,6 +28,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
+  AgentSession,
   Alert,
   ItemStatus,
   Operation,
@@ -1088,6 +1090,9 @@ export function TaskWorkspace({
                       <ExternalLink size={12} />
                     </button>
                   )}
+                  {document.header.agent_session && (
+                    <AgentSessionChip session={document.header.agent_session} />
+                  )}
                 </div>
                 {document.header.description && (
                   <Markdown>{document.header.description}</Markdown>
@@ -1120,6 +1125,51 @@ export function TaskWorkspace({
 
       <Scratchpad taskId={task.id} />
     </div>
+  );
+}
+
+function shellQuote(value: string) {
+  return `'${value.replaceAll("'", `'\"'\"'`)}'`;
+}
+
+function AgentSessionChip({ session }: { session: AgentSession }) {
+  const [copied, setCopied] = useState(false);
+  const providerLabel = session.provider === "claude" ? "Claude" : "Codex";
+  const resume =
+    session.provider === "claude"
+      ? `claude --resume ${shellQuote(session.session_id)}`
+      : `codex resume ${shellQuote(session.session_id)}`;
+  const resumeCommand = session.cwd
+    ? `cd ${shellQuote(session.cwd)} && ${resume}`
+    : resume;
+  const detail = [
+    `${providerLabel} session`,
+    session.session_id,
+    session.model && `Model: ${session.model}`,
+    session.cwd && `Directory: ${session.cwd}`,
+    `Resume: ${resumeCommand}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return (
+    <button
+      type="button"
+      className="agent-session-chip"
+      data-magnify={detail}
+      aria-label={`Copy command to resume ${providerLabel} session ${session.session_id}`}
+      title={`Copy resume command\n${resumeCommand}`}
+      onClick={() => {
+        navigator.clipboard.writeText(resumeCommand).catch(() => undefined);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      }}
+    >
+      <Bot size={13} />
+      <span>{providerLabel}</span>
+      <code>{session.session_id}</code>
+      {copied ? <Check size={12} /> : <Copy size={12} />}
+    </button>
   );
 }
 

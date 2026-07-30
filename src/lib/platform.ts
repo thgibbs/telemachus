@@ -125,6 +125,16 @@ function applyBrowserOperation(
       next.header.status = payload.status;
       next.header.status_message = payload.status_message ?? "";
       break;
+    case "set_agent_session":
+      next.header.agent_session = {
+        provider: payload.provider,
+        session_id: payload.session_id,
+        cwd: payload.cwd,
+        model: payload.model ?? "",
+        start_source: payload.start_source ?? "",
+        updated_at: new Date().toISOString(),
+      };
+      break;
     case "replace_tasks":
       next.tasks = payload.tasks;
       break;

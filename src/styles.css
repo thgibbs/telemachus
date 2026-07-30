@@ -1128,6 +1128,46 @@ button:disabled {
   outline-offset: 2px;
 }
 
+.agent-session-chip {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  gap: 5px;
+  padding: 4px 7px;
+  border: 1px solid #49563c;
+  border-radius: 6px;
+  background: #20251d;
+  color: #c9e99a;
+  font: inherit;
+  font-size: calc(10px * var(--text-scale));
+  line-height: 1;
+  cursor: copy;
+}
+
+.agent-session-chip:hover {
+  border-color: #6f825b;
+  background: #272e22;
+  color: #dcf5b5;
+}
+
+.agent-session-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.agent-session-chip span {
+  font-weight: 750;
+}
+
+.agent-session-chip code {
+  color: inherit;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: calc(9px * var(--text-scale));
+  text-transform: none;
+}
+
 .task-identity > .markdown {
   max-width: 760px;
   margin-top: 6px;

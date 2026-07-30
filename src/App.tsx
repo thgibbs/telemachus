@@ -83,6 +83,7 @@ function changedSection(
   switch (update.op_type) {
     case "set_task":
     case "set_task_status":
+    case "set_agent_session":
       return "header";
     case "replace_tasks":
     case "upsert_task":

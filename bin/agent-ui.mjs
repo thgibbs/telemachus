@@ -912,6 +912,50 @@ async function taskCommand(subcommand) {
   usageError("task requires get, set, or status");
 }
 
+async function sessionCommand(subcommand) {
+  if (subcommand === "get") {
+    const body = await context();
+    print(
+      body.document.header.agent_session ?? null,
+      body.document.header.agent_session
+        ? `${body.document.header.agent_session.provider}\t${body.document.header.agent_session.session_id}`
+        : "(none)",
+    );
+    return;
+  }
+  if (subcommand === "attach") {
+    const provider = takeOption("provider");
+    if (!["codex", "claude"].includes(provider)) {
+      usageError("session attach requires --provider codex|claude");
+    }
+    const input = await readJsonInput(undefined, "SessionStart hook input");
+    ensureNoOptions();
+    if (
+      !input ||
+      typeof input !== "object" ||
+      input.hook_event_name !== "SessionStart"
+    ) {
+      usageError("session attach requires SessionStart hook JSON");
+    }
+    if (
+      typeof input.session_id !== "string" ||
+      input.session_id.trim().length === 0
+    ) {
+      usageError("SessionStart hook input requires session_id");
+    }
+    const body = await operate("set_agent_session", {
+      provider,
+      session_id: input.session_id,
+      cwd: typeof input.cwd === "string" ? input.cwd : "",
+      model: typeof input.model === "string" ? input.model : "",
+      start_source: typeof input.source === "string" ? input.source : "",
+    });
+    printWrite(body, "set_agent_session");
+    return;
+  }
+  usageError("session requires get or attach");
+}
+
 async function planCommand(subcommand) {
   if (subcommand === "list") {
     const body = await context();
@@ -1452,6 +1496,7 @@ Read:
   agent-ui doctor
   agent-ui context
   agent-ui task get
+  agent-ui session get
   agent-ui plan list
   agent-ui summary get
   agent-ui alert list
@@ -1462,6 +1507,9 @@ Read:
 Write task state:
   agent-ui task set --title TITLE [--description TEXT] [--issue-url URL] [--status STATUS] [--message TEXT]
   agent-ui task status STATUS [--message TEXT]
+
+Session hook integration:
+  agent-ui session attach --provider codex|claude --stdin
 
 Write the plan:
   agent-ui plan replace JSON_ARRAY
@@ -1569,6 +1617,7 @@ async function main() {
     return;
   }
   if (command === "task") return taskCommand(argv.shift());
+  if (command === "session") return sessionCommand(argv.shift());
   if (command === "plan") return planCommand(argv.shift());
   if (command === "summary") {
     const subcommand = ["get", "set", "clear"].includes(argv[0])

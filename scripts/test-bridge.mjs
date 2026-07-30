@@ -18,6 +18,7 @@ let document = {
     source: "test",
     status: "idle",
     status_message: "",
+    agent_session: null,
   },
   tasks: [],
   questions: [],
@@ -36,13 +37,25 @@ function applyOperation(operation) {
   const payload = operation.payload;
   switch (operation.op_type) {
     case "set_task":
-      document.header = payload;
+      document.header = {
+        ...payload,
+        agent_session: document.header.agent_session ?? null,
+      };
       break;
     case "set_task_status":
       document.header = {
         ...document.header,
         status: payload.status,
         status_message: payload.status_message ?? "",
+      };
+      break;
+    case "set_agent_session":
+      document.header = {
+        ...document.header,
+        agent_session: {
+          ...payload,
+          updated_at: new Date().toISOString(),
+        },
       };
       break;
     case "replace_tasks":
@@ -197,6 +210,29 @@ assert.match(instructions.stdout, /## Recommended completion update/);
 const doctor = await run("bin/agent-ui.mjs", ["doctor", "--compact"]);
 assert.equal(JSON.parse(doctor.stdout).task_id, taskId);
 
+const attachedSession = await run(
+  "bin/agent-ui.mjs",
+  [
+    "session",
+    "attach",
+    "--provider",
+    "claude",
+    "--stdin",
+    "--output",
+    "quiet",
+  ],
+  JSON.stringify({
+    session_id: "claude-session-123",
+    cwd: "/tmp/bridge-project",
+    hook_event_name: "SessionStart",
+    source: "startup",
+    model: "claude-opus",
+  }),
+);
+assert.equal(attachedSession.stdout, "");
+assert.equal(document.header.agent_session.provider, "claude");
+assert.equal(document.header.agent_session.session_id, "claude-session-123");
+
 await run("bin/agent-ui.mjs", [
   "task",
   "set",
@@ -214,6 +250,7 @@ assert.equal(
   document.header.issue_url,
   "https://github.com/openai/codex/issues/456",
 );
+assert.equal(document.header.agent_session.session_id, "claude-session-123");
 
 await run("bin/agent-ui.mjs", [
   "plan",
