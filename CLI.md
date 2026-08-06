@@ -95,6 +95,11 @@ Plan statuses are `pending`, `in_progress`, `completed`, `blocked`, and
 the ID to exist. Read-modify-write commands automatically use the revision read
 from the screen and return exit code 2 if another writer wins the race.
 
+The plan is the high-level, end-to-end plan for the linked GitHub issue. It
+contains every stage needed to close the issue—including completed, current,
+and future stages—not just the working plan for the current stage. Status is
+where the agent records the current stage and what it is doing within it.
+
 Plan JSON is an array:
 
 ```json
@@ -207,25 +212,19 @@ unified collection. It does not address a separate panel.
 ## Human to dos
 
 ```bash
-agent-ui todo list [--state open] [--kind question|action]
+agent-ui todo list [--state open]
 agent-ui todo get ID
 agent-ui todo add ID TEXT [--blocking] [--timeout SECONDS]
-agent-ui todo ask ID TEXT \
-  [--choice VALUE ...] [--timeout SECONDS] [--no-free-text]
-agent-ui todo ask ID TEXT --non-blocking
 ```
 
 `todo add` creates an action for the human, such as deploying, merging, or
 reviewing. Actions are non-blocking by default; `--blocking` waits up to 300
 seconds for the human to mark the item done.
 
-`todo ask` creates a question. Questions are blocking by default and wait up to
-300 seconds for an answer. `--non-blocking` returns immediately. Poll either
-kind with `todo get`. A blocking todo returns exit code 3 if the wait times out
-or is cancelled.
-
-`agent-ui question list|get|ask` remains available as a question-only
-compatibility alias.
+When the human owes an answer, record the needed decision as an action and ask
+the question in the terminal conversation. The To do pane does not render
+question forms or answer choices. A blocking todo returns exit code 3 if the
+wait times out or is cancelled.
 
 ## Whole-screen publication
 
@@ -251,11 +250,12 @@ agent-ui apply OPERATION --stdin
 
 Supported operation names are `set_task`, `set_task_status`, `replace_tasks`,
 `upsert_task`, `ask_user`, `set_summary`, `raise_alert`, `clear_alert`, and
-`replace_resources`. The host validates the same strict payload schemas used by
-the UI.
+`replace_resources`. `ask_user` is the protocol-level legacy name for adding an
+action-only todo. The host validates the same strict payload schemas used by the
+UI.
 
 Compatibility aliases from the prototype remain available: `set-task`,
-`status`, `tasks`, `resources`, `ask`, and `op`.
+`status`, `tasks`, `resources`, and `op`.
 
 ## Exit codes
 

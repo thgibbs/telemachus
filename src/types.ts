@@ -138,6 +138,13 @@ export interface TaskSession {
   };
 }
 
+export interface WorkspaceContext {
+  directory: string;
+  repository_root: string;
+  branch: string;
+  worktree: boolean;
+}
+
 export interface Operation {
   protocol_version: "1.0";
   task_id: string;

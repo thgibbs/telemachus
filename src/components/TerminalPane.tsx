@@ -9,7 +9,7 @@ import {
   writeTerminal,
 } from "../lib/platform";
 import { TerminalSquare } from "lucide-react";
-import type { TerminalOutput } from "../types";
+import type { AgentProvider, TerminalOutput } from "../types";
 
 function renderedTerminalText(terminal: Terminal): string {
   const buffer = terminal.buffer.active;
@@ -31,11 +31,13 @@ export function TerminalPane({
   taskId,
   active,
   textScale,
+  agentProvider,
   onOutputActivity,
 }: {
   taskId: string;
   active: boolean;
   textScale: number;
+  agentProvider?: AgentProvider;
   onOutputActivity?: (sessionId: string, renderedOutput: string) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -45,10 +47,12 @@ export function TerminalPane({
   const activeRef = useRef(active);
   const inputArmedRef = useRef(false);
   const recoveryArmedRef = useRef(false);
+  const agentProviderRef = useRef(agentProvider);
   const onOutputActivityRef = useRef(onOutputActivity);
   const [legacyHost, setLegacyHost] = useState(false);
   const [recovering, setRecovering] = useState(false);
   activeRef.current = active;
+  agentProviderRef.current = agentProvider;
   onOutputActivityRef.current = onOutputActivity;
 
   const reportError = (error: unknown) => {
@@ -120,6 +124,11 @@ export function TerminalPane({
       terminal.write(data, () => reportOutputActivity(sessionId));
     };
 
+    const shiftEnterBytes = () =>
+      agentProviderRef.current === "claude"
+        ? [0x5c, 0x0d] // Claude's documented terminal-independent `\` + Return escape.
+        : [0x0a]; // Codex's multiline input byte (Ctrl+J/LF).
+
     const encodeKey = (event: KeyboardEvent): number[] | null => {
       if (event.isComposing || event.metaKey) return null;
       if (event.ctrlKey && !event.altKey && event.key.length === 1) {
@@ -142,7 +151,7 @@ export function TerminalPane({
         return Array.from(new TextEncoder().encode(escapeSequence));
       }
       if (event.key === "Enter") {
-        return event.shiftKey ? [0x1b, 0x0d] : [0x0d];
+        return event.shiftKey ? shiftEnterBytes() : [0x0d];
       }
       if (event.key === "Backspace") return [0x7f];
       if (event.key === "Tab") return [0x09];
@@ -220,7 +229,7 @@ export function TerminalPane({
         !event.metaKey
       ) {
         if (sessionRef.current) {
-          writeTerminal(sessionRef.current, [0x1b, 0x0d]).catch(reportError);
+          writeTerminal(sessionRef.current, shiftEnterBytes()).catch(reportError);
         }
         return false;
       }
@@ -383,12 +392,9 @@ export function TerminalPane({
     if (!active || !terminalRef.current) return;
     requestAnimationFrame(() => {
       terminalRef.current?.focus();
-      if (terminalRef.current && sessionRef.current) {
-        onOutputActivityRef.current?.(
-          sessionRef.current,
-          renderedTerminalText(terminalRef.current),
-        );
-      }
+      // Output activity already captures PR links as bytes arrive. Walking the
+      // full scrollback here made every tab activation proportional to terminal
+      // history, which is especially noticeable near the 6,000-line limit.
     });
   }, [active]);
 

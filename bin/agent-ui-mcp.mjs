@@ -5,7 +5,8 @@ import readline from "node:readline";
 
 const endpoint = process.env.AGENT_UI_ENDPOINT;
 const taskId = process.env.AGENT_UI_TASK_ID;
-const token = process.env.AGENT_UI_TOKEN;
+const token =
+  process.env.AGENT_UI_CREDENTIAL || process.env.AGENT_UI_TOKEN;
 const protocolVersion = process.env.AGENT_UI_PROTOCOL_VERSION || "1.0";
 
 if (!endpoint || !taskId || !token) {
@@ -98,33 +99,6 @@ const tools = [
     },
   },
   {
-    name: "ask_user",
-    description: "Add a question to the human To do pane and optionally wait for its answer.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["id", "text"],
-      properties: {
-        id: { type: "string" },
-        text: { type: "string" },
-        blocking: { type: "boolean", default: true },
-        choices: { type: "array", items: { type: "string" } },
-        allow_free_text: { type: "boolean", default: true },
-        wait_seconds: { type: "integer", minimum: 0, maximum: 3600, default: 300 },
-      },
-    },
-  },
-  {
-    name: "get_question",
-    description: "Read a question and its current answer from the human To do pane.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["id"],
-      properties: { id: { type: "string" } },
-    },
-  },
-  {
     name: "add_todo",
     description:
       "Add an action the human needs to complete, such as deploying, merging, or reviewing.",
@@ -142,7 +116,7 @@ const tools = [
   },
   {
     name: "get_todo",
-    description: "Read any action or question from the human To do pane.",
+    description: "Read an action from the human To do pane.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -226,51 +200,30 @@ async function callTool(name, input = {}) {
   if (name === "get_task_context") {
     return (await request("/v1/context")).document;
   }
-  if (name === "get_question" || name === "get_todo") {
+  if (name === "get_todo") {
     const document = (await request("/v1/context")).document;
     const todo =
       document.questions.find((question) => question.id === input.id) ?? null;
-    if (name === "get_question" && (todo?.kind ?? "question") !== "question") {
-      return null;
-    }
-    return todo ? { kind: "question", ...todo } : null;
+    return todo ? { ...todo, kind: "action" } : null;
   }
-  const isQuestion = name === "ask_user";
   const isAction = name === "add_todo";
-  const blocking = isQuestion
-    ? input.blocking ?? true
-    : isAction
-      ? input.blocking ?? false
-      : false;
+  const blocking = isAction ? input.blocking ?? false : false;
   const waitSeconds =
-    (isQuestion || isAction) && blocking
+    isAction && blocking
       ? input.wait_seconds ?? 300
       : undefined;
-  const payload =
-    isQuestion
-      ? {
-          id: input.id,
-          kind: "question",
-          text: input.text,
-          blocking,
-          choices: input.choices ?? [],
-          allow_free_text: input.allow_free_text ?? true,
-          answer: null,
-          state: "open",
-          created_at: new Date().toISOString(),
-        }
-      : isAction
-        ? {
-            id: input.id,
-            kind: "action",
-            text: input.text,
-            blocking,
-            choices: [],
-            allow_free_text: false,
-            answer: null,
-            state: "open",
-            created_at: new Date().toISOString(),
-          }
+  const payload = isAction
+    ? {
+        id: input.id,
+        kind: "action",
+        text: input.text,
+        blocking,
+        choices: [],
+        allow_free_text: false,
+        answer: null,
+        state: "open",
+        created_at: new Date().toISOString(),
+      }
       : name === "raise_alert"
         ? { state: "active", message: "", ...input }
         : input;

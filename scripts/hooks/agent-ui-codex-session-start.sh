@@ -4,6 +4,13 @@
 
 set -u
 
+# A Codex process launched by Claude is a delegate of the primary Telemachus
+# agent. Do not let it replace Claude's resumable session or receive instructions
+# that tell it to write to Claude's task screen.
+if [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+  exit 0
+fi
+
 [ -n "${AGENT_UI_TASK_ID:-}" ] || exit 0
 
 agent_ui_cli="${AGENT_UI_CLI:-}"

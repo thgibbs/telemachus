@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command as ProcessCommand, Stdio},
@@ -34,6 +35,8 @@ const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 const MAX_COLLECTION: usize = 500;
 const MAX_STRING: usize = 64 * 1024;
 const MAX_SCRATCHPAD: usize = 256 * 1024;
+const MAX_LOCAL_REVIEW_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_PRIOR_REVIEW_CONTEXT_BYTES: usize = 256 * 1024;
 const MAX_TERMINAL_BUFFER: usize = 2 * 1024 * 1024;
 const CODEX_REVIEW_MODEL: &str = "gpt-5.6-sol";
 const CODEX_REVIEW_REASONING_CONFIG: &str = "model_reasoning_effort=high";
@@ -341,6 +344,14 @@ pub struct TaskSession {
     pub created_at: String,
     pub updated_at: String,
     pub layout: Layout,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorkspaceContext {
+    pub directory: String,
+    pub repository_root: String,
+    pub branch: String,
+    pub worktree: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -942,10 +953,9 @@ fn apply_to_document(
         }
         "ask_user" => {
             let mut payload: Question = serde_json::from_value(payload).map_err(payload_error)?;
-            if payload.kind == TodoKind::Action {
-                payload.choices.clear();
-                payload.allow_free_text = false;
-            }
+            payload.kind = TodoKind::Action;
+            payload.choices.clear();
+            payload.allow_free_text = false;
             payload.answer = None;
             payload.state = QuestionState::Open;
             if let Some(item) = document
@@ -1286,6 +1296,25 @@ fn complete_todo_core(
     task_id: String,
     todo_id: String,
 ) -> Result<PresentationDocument, String> {
+    set_todo_completed_core(state, task_id, todo_id, true)
+}
+
+#[tauri::command]
+fn set_todo_completed(
+    state: tauri::State<'_, Arc<AppState>>,
+    task_id: String,
+    todo_id: String,
+    completed: bool,
+) -> Result<PresentationDocument, String> {
+    set_todo_completed_core(&state, task_id, todo_id, completed)
+}
+
+fn set_todo_completed_core(
+    state: &AppState,
+    task_id: String,
+    todo_id: String,
+    completed: bool,
+) -> Result<PresentationDocument, String> {
     validate_id(&task_id)?;
     validate_id(&todo_id)?;
     let mut connection = state.db.lock().map_err(display_error)?;
@@ -1304,14 +1333,88 @@ fn complete_todo_core(
         .iter_mut()
         .find(|todo| todo.id == todo_id)
         .ok_or_else(|| "todo_not_found".to_string())?;
-    if todo.kind != TodoKind::Action {
-        return Err("todo_is_not_action".into());
-    }
-    if todo.state != QuestionState::Open {
-        return Err("todo_not_open".into());
+    match (&todo.state, completed) {
+        (QuestionState::Open, true) => todo.state = QuestionState::Completed,
+        (QuestionState::Completed, false) => todo.state = QuestionState::Open,
+        (QuestionState::Completed, true) | (QuestionState::Open, false) => return Ok(document),
+        _ => return Err("todo_cannot_change_completion".into()),
     }
     todo.answer = None;
-    todo.state = QuestionState::Completed;
+    document.revision += 1;
+    document.updated_at = now();
+    transaction
+        .execute(
+            "UPDATE tasks SET document_json = ?1, updated_at = ?2 WHERE id = ?3",
+            params![
+                serde_json::to_string(&document).map_err(display_error)?,
+                document.updated_at,
+                task_id
+            ],
+        )
+        .map_err(display_error)?;
+    transaction.commit().map_err(display_error)?;
+    drop(connection);
+
+    if completed {
+        let key = waiter_key(&task_id, &todo_id);
+        if let Some(waiter) = state.waiters.lock().map_err(display_error)?.remove(&key) {
+            let _ = waiter.send(WaitResult {
+                status: "completed".into(),
+                answer: None,
+                question_id: todo_id.clone(),
+            });
+        }
+    }
+    emit_presentation_updated(
+        state,
+        &task_id,
+        Some("human"),
+        Some(if completed {
+            "complete_todo"
+        } else {
+            "reopen_todo"
+        }),
+    );
+    Ok(document)
+}
+
+#[tauri::command]
+fn dismiss_todo(
+    state: tauri::State<'_, Arc<AppState>>,
+    task_id: String,
+    todo_id: String,
+) -> Result<PresentationDocument, String> {
+    dismiss_todo_core(&state, task_id, todo_id)
+}
+
+fn dismiss_todo_core(
+    state: &AppState,
+    task_id: String,
+    todo_id: String,
+) -> Result<PresentationDocument, String> {
+    validate_id(&task_id)?;
+    validate_id(&todo_id)?;
+    let mut connection = state.db.lock().map_err(display_error)?;
+    let transaction = connection.transaction().map_err(display_error)?;
+    let document_json: String = transaction
+        .query_row(
+            "SELECT document_json FROM tasks WHERE id = ?1",
+            [&task_id],
+            |row| row.get(0),
+        )
+        .map_err(display_error)?;
+    let mut document: PresentationDocument =
+        serde_json::from_str(&document_json).map_err(display_error)?;
+    let todo = document
+        .questions
+        .iter_mut()
+        .find(|todo| todo.id == todo_id)
+        .ok_or_else(|| "todo_not_found".to_string())?;
+    if todo.state == QuestionState::Cancelled {
+        return Ok(document);
+    }
+    todo.answer = None;
+    todo.state = QuestionState::Cancelled;
     document.revision += 1;
     document.updated_at = now();
     transaction
@@ -1330,12 +1433,131 @@ fn complete_todo_core(
     let key = waiter_key(&task_id, &todo_id);
     if let Some(waiter) = state.waiters.lock().map_err(display_error)?.remove(&key) {
         let _ = waiter.send(WaitResult {
-            status: "completed".into(),
+            status: "cancelled".into(),
             answer: None,
             question_id: todo_id,
         });
     }
-    emit_presentation_updated(&state, &task_id, Some("human"), Some("complete_todo"));
+    emit_presentation_updated(state, &task_id, Some("human"), Some("dismiss_todo"));
+    Ok(document)
+}
+
+#[tauri::command]
+fn clear_all_alerts(
+    state: tauri::State<'_, Arc<AppState>>,
+    task_id: String,
+) -> Result<PresentationDocument, String> {
+    clear_all_alerts_core(&state, task_id)
+}
+
+fn clear_all_alerts_core(
+    state: &AppState,
+    task_id: String,
+) -> Result<PresentationDocument, String> {
+    validate_id(&task_id)?;
+    let mut connection = state.db.lock().map_err(display_error)?;
+    let transaction = connection.transaction().map_err(display_error)?;
+    let document_json: String = transaction
+        .query_row(
+            "SELECT document_json FROM tasks WHERE id = ?1",
+            [&task_id],
+            |row| row.get(0),
+        )
+        .map_err(display_error)?;
+    let mut document: PresentationDocument =
+        serde_json::from_str(&document_json).map_err(display_error)?;
+    let mut changed = false;
+    for alert in &mut document.alerts {
+        if alert.state != AlertState::Cleared {
+            alert.state = AlertState::Cleared;
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(document);
+    }
+    document.revision += 1;
+    document.updated_at = now();
+    transaction
+        .execute(
+            "UPDATE tasks SET document_json = ?1, updated_at = ?2 WHERE id = ?3",
+            params![
+                serde_json::to_string(&document).map_err(display_error)?,
+                document.updated_at,
+                task_id
+            ],
+        )
+        .map_err(display_error)?;
+    transaction.commit().map_err(display_error)?;
+    drop(connection);
+    emit_presentation_updated(state, &task_id, Some("human"), Some("clear_all_alerts"));
+    Ok(document)
+}
+
+#[tauri::command]
+fn dismiss_all_todos(
+    state: tauri::State<'_, Arc<AppState>>,
+    task_id: String,
+) -> Result<PresentationDocument, String> {
+    dismiss_all_todos_core(&state, task_id)
+}
+
+fn dismiss_all_todos_core(
+    state: &AppState,
+    task_id: String,
+) -> Result<PresentationDocument, String> {
+    validate_id(&task_id)?;
+    let mut connection = state.db.lock().map_err(display_error)?;
+    let transaction = connection.transaction().map_err(display_error)?;
+    let document_json: String = transaction
+        .query_row(
+            "SELECT document_json FROM tasks WHERE id = ?1",
+            [&task_id],
+            |row| row.get(0),
+        )
+        .map_err(display_error)?;
+    let mut document: PresentationDocument =
+        serde_json::from_str(&document_json).map_err(display_error)?;
+    let mut dismissed_ids = Vec::new();
+    for todo in &mut document.questions {
+        if matches!(
+            todo.state,
+            QuestionState::Open | QuestionState::Completed | QuestionState::Answered
+        ) {
+            todo.state = QuestionState::Cancelled;
+            todo.answer = None;
+            dismissed_ids.push(todo.id.clone());
+        }
+    }
+    if dismissed_ids.is_empty() {
+        return Ok(document);
+    }
+    document.revision += 1;
+    document.updated_at = now();
+    transaction
+        .execute(
+            "UPDATE tasks SET document_json = ?1, updated_at = ?2 WHERE id = ?3",
+            params![
+                serde_json::to_string(&document).map_err(display_error)?,
+                document.updated_at,
+                task_id
+            ],
+        )
+        .map_err(display_error)?;
+    transaction.commit().map_err(display_error)?;
+    drop(connection);
+    let mut waiters = state.waiters.lock().map_err(display_error)?;
+    for todo_id in dismissed_ids {
+        if let Some(waiter) = waiters.remove(&waiter_key(&task_id, &todo_id)) {
+            let _ = waiter.send(WaitResult {
+                status: "cancelled".into(),
+                answer: None,
+                question_id: todo_id,
+            });
+        }
+    }
+    drop(waiters);
+    emit_presentation_updated(state, &task_id, Some("human"), Some("dismiss_all_todos"));
     Ok(document)
 }
 
@@ -1474,6 +1696,15 @@ fn create_terminal(
                 .unwrap_or_else(default_directory)
         }
     };
+    let document = get_document_core(&state, &task_id)?;
+    if let Some(session) = document.header.agent_session {
+        let resume_directory = (!session.cwd.is_empty()
+            && Path::new(&session.cwd).is_absolute()
+            && Path::new(&session.cwd).is_dir())
+        .then_some(session.cwd.clone())
+        .unwrap_or(directory);
+        return create_resumed_terminal_core(&state, task_id, resume_directory, &session);
+    }
     create_terminal_core(&state, task_id, directory)
 }
 
@@ -1521,6 +1752,37 @@ fn create_terminal_core(
     spawn_terminal_command_core(state, task_id, starting_directory, command)
 }
 
+fn agent_resume_program_and_arguments(
+    session: &AgentSession,
+) -> Result<(PathBuf, Vec<String>), String> {
+    let program = match session.provider {
+        AgentProvider::Codex => locate_codex_cli()?,
+        AgentProvider::Claude => locate_claude_cli()?,
+    };
+    Ok((program, agent_resume_arguments(session)))
+}
+
+fn agent_resume_arguments(session: &AgentSession) -> Vec<String> {
+    match session.provider {
+        AgentProvider::Codex => vec!["resume".into(), session.session_id.clone()],
+        AgentProvider::Claude => vec!["--resume".into(), session.session_id.clone()],
+    }
+}
+
+fn create_resumed_terminal_core(
+    state: &Arc<AppState>,
+    task_id: String,
+    starting_directory: String,
+    session: &AgentSession,
+) -> Result<String, String> {
+    let (program, arguments) = agent_resume_program_and_arguments(session)?;
+    let mut command = CommandBuilder::new(program.to_string_lossy().to_string());
+    for argument in arguments {
+        command.arg(argument);
+    }
+    spawn_terminal_command_core(state, task_id, starting_directory, command)
+}
+
 fn spawn_terminal_command_core(
     state: &Arc<AppState>,
     task_id: String,
@@ -1542,6 +1804,7 @@ fn spawn_terminal_command_core(
     command.env("AGENT_UI_TASK_ID", &task_id);
     command.env("AGENT_UI_ENDPOINT", bridge.endpoint);
     command.env("AGENT_UI_PROTOCOL_VERSION", PROTOCOL_VERSION);
+    command.env("AGENT_UI_CREDENTIAL", &bridge.token);
     command.env("AGENT_UI_TOKEN", bridge.token);
     command.env("AGENT_UI_SOURCE", "agent-ui-terminal");
     command.env("AGENT_UI_CLI", &state.cli_path);
@@ -1725,6 +1988,139 @@ enum ArtifactTarget {
     Web(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocumentArtifactKind {
+    Local,
+    Web,
+}
+
+fn path_like_artifact(target: &str) -> bool {
+    let path = Path::new(target);
+    path.is_absolute()
+        || target.starts_with("./")
+        || target.starts_with("../")
+        || target.contains('/')
+        || path.extension().is_some()
+}
+
+fn document_artifact_kind(resource_type: &str, target: &str) -> Option<DocumentArtifactKind> {
+    if matches!(resource_type, "web_document" | "url")
+        || (matches!(resource_type, "note" | "path")
+            && url::Url::parse(target).is_ok_and(|url| matches!(url.scheme(), "http" | "https")))
+    {
+        return Some(DocumentArtifactKind::Web);
+    }
+    if resource_type == "local_document"
+        || (matches!(resource_type, "note" | "path") && path_like_artifact(target))
+    {
+        return Some(DocumentArtifactKind::Local);
+    }
+    None
+}
+
+fn task_starting_directory(state: &AppState, task_id: &str) -> Result<PathBuf, String> {
+    validate_id(task_id)?;
+    let connection = state.db.lock().map_err(display_error)?;
+    let directory = connection
+        .query_row(
+            "SELECT starting_directory FROM tasks WHERE id = ?1",
+            [task_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(display_error)?
+        .unwrap_or_else(default_directory);
+    Ok(PathBuf::from(directory))
+}
+
+fn git_output(directory: &Path, arguments: &[&str]) -> Option<String> {
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args(arguments)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn resolve_git_path(directory: &Path, value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else {
+        directory.join(path)
+    }
+}
+
+#[tauri::command]
+fn get_workspace_context(
+    state: tauri::State<'_, Arc<AppState>>,
+    task_id: String,
+) -> Result<Option<WorkspaceContext>, String> {
+    validate_id(&task_id)?;
+    let document = get_document_core(&state, &task_id)?;
+    let directory = document
+        .header
+        .agent_session
+        .as_ref()
+        .map(|session| PathBuf::from(&session.cwd))
+        .filter(|path| path.is_absolute() && path.is_dir())
+        .unwrap_or(task_starting_directory(&state, &task_id)?);
+    let Some(repository_root) = git_output(&directory, &["rev-parse", "--show-toplevel"]) else {
+        return Ok(None);
+    };
+    let branch = git_output(&directory, &["branch", "--show-current"]).or_else(|| {
+        git_output(&directory, &["rev-parse", "--short", "HEAD"])
+            .map(|commit| format!("detached@{commit}"))
+    });
+    let Some(branch) = branch else {
+        return Ok(None);
+    };
+    let git_dir = git_output(&directory, &["rev-parse", "--git-dir"])
+        .map(|path| resolve_git_path(&directory, &path));
+    let common_dir = git_output(&directory, &["rev-parse", "--git-common-dir"])
+        .map(|path| resolve_git_path(&directory, &path));
+    let worktree = match (git_dir, common_dir) {
+        (Some(git_dir), Some(common_dir)) => {
+            git_dir.canonicalize().unwrap_or(git_dir)
+                != common_dir.canonicalize().unwrap_or(common_dir)
+        }
+        _ => false,
+    };
+    Ok(Some(WorkspaceContext {
+        directory: directory.to_string_lossy().to_string(),
+        repository_root,
+        branch,
+        worktree,
+    }))
+}
+
+fn resolve_document_artifact(
+    state: &AppState,
+    task_id: Option<&str>,
+    resource_type: &str,
+    target: &str,
+) -> Result<ArtifactTarget, String> {
+    match document_artifact_kind(resource_type, target) {
+        Some(DocumentArtifactKind::Web) => validate_artifact_target("web_document", target),
+        Some(DocumentArtifactKind::Local) => {
+            let path = PathBuf::from(target);
+            let path = if path.is_absolute() {
+                path
+            } else {
+                let task_id =
+                    task_id.ok_or_else(|| "task_id_required_for_relative_path".to_string())?;
+                task_starting_directory(state, task_id)?.join(path)
+            };
+            validate_artifact_target("local_document", &path.to_string_lossy())
+        }
+        None => Err("artifact_is_not_a_document".into()),
+    }
+}
+
 fn validate_artifact_target(artifact_type: &str, target: &str) -> Result<ArtifactTarget, String> {
     validate_string("artifact.target", target, 8192)?;
     match artifact_type {
@@ -1851,6 +2247,7 @@ struct GitHubPullRequestReference {
     repository: String,
     number: u64,
     url: String,
+    prior_review: Option<PriorGitHubReview>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1863,7 +2260,21 @@ struct GitHubIssueReference {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LocalDocumentReviewReference {
     source_path: String,
-    canonical_path: PathBuf,
+    review_target: String,
+    web: bool,
+    prior_review: Option<PriorLocalDocumentReview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PriorLocalDocumentReview {
+    path: PathBuf,
+    content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PriorGitHubReview {
+    url: String,
+    content: String,
 }
 
 fn github_pull_request_reference(target: &str) -> Result<GitHubPullRequestReference, String> {
@@ -1880,6 +2291,7 @@ fn github_pull_request_reference(target: &str) -> Result<GitHubPullRequestRefere
             .parse::<u64>()
             .map_err(|_| "invalid_github_pull_request_url".to_string())?,
         url: target.to_string(),
+        prior_review: None,
     })
 }
 
@@ -2152,11 +2564,89 @@ fn github_issue_reference(target: &str) -> Result<GitHubIssueReference, String> 
     })
 }
 
+fn github_review_id(review_url: &str) -> Option<u64> {
+    review_url
+        .split("#pullrequestreview-")
+        .nth(1)?
+        .split(|character: char| !character.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn load_prior_github_review(
+    pull_request: &GitHubPullRequestReference,
+    review_url: &str,
+) -> Option<PriorGitHubReview> {
+    let review_id = github_review_id(review_url)?;
+    let review_endpoint = format!(
+        "repos/{}/{}/pulls/{}/reviews/{}",
+        pull_request.owner, pull_request.repository, pull_request.number, review_id
+    );
+    let review_output = ProcessCommand::new(github_cli_path())
+        .args(["api", &review_endpoint])
+        .env("GH_PROMPT_DISABLED", "1")
+        .output()
+        .ok()?;
+    if !review_output.status.success() {
+        return None;
+    }
+    let review: GitHubPullRequestReview = serde_json::from_slice(&review_output.stdout).ok()?;
+    let comments_endpoint = format!("{review_endpoint}/comments?per_page=100");
+    let comments = ProcessCommand::new(github_cli_path())
+        .args(["api", &comments_endpoint])
+        .env("GH_PROMPT_DISABLED", "1")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            serde_json::from_slice::<Vec<GitHubPullRequestReviewComment>>(&output.stdout).ok()
+        })
+        .unwrap_or_default();
+    let mut sections = Vec::new();
+    if let Some(body) = review
+        .body
+        .as_deref()
+        .filter(|body| !body.trim().is_empty())
+    {
+        sections.push(format!("Review summary:\n{}", body.trim()));
+    }
+    if !comments.is_empty() {
+        sections.push(format!(
+            "Inline comments:\n{}",
+            comments
+                .iter()
+                .filter_map(|comment| {
+                    let body = comment
+                        .body
+                        .as_deref()
+                        .filter(|body| !body.trim().is_empty())?;
+                    let line = comment.line.or(comment.original_line);
+                    Some(format!(
+                        "- {}{}: {}",
+                        comment.path,
+                        line.map(|line| format!(":{line}")).unwrap_or_default(),
+                        body.trim()
+                    ))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    Some(PriorGitHubReview {
+        url: review_url.into(),
+        content: if sections.is_empty() {
+            "The prior review did not contain a summary or inline comments.".into()
+        } else {
+            sections.join("\n\n")
+        },
+    })
+}
+
 fn review_prompt(
     pull_requests: &[GitHubPullRequestReference],
     documents: &[LocalDocumentReviewReference],
-    issue: &GitHubIssueReference,
-    issue_url: &str,
+    issue: Option<(&GitHubIssueReference, &str)>,
 ) -> String {
     let pull_request_list = pull_requests
         .iter()
@@ -2170,15 +2660,61 @@ fn review_prompt(
         .join("\n");
     let document_list = documents
         .iter()
-        .map(|document| format!("- {}", document.canonical_path.display()))
+        .filter(|document| !document.web)
+        .map(|document| format!("- {}", document.review_target))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let web_document_list = documents
+        .iter()
+        .filter(|document| document.web)
+        .map(|document| format!("- {}", document.review_target))
         .collect::<Vec<_>>()
         .join("\n");
     let mut targets = Vec::new();
     if !pull_requests.is_empty() {
         targets.push(format!("Pull requests:\n{pull_request_list}"));
     }
-    if !documents.is_empty() {
+    if !document_list.is_empty() {
         targets.push(format!("Local documents:\n{document_list}"));
+    }
+    if !web_document_list.is_empty() {
+        targets.push(format!("Web documents:\n{web_document_list}"));
+    }
+    let prior_pull_request_reviews = pull_requests
+        .iter()
+        .filter_map(|pull_request| {
+            pull_request.prior_review.as_ref().map(|prior_review| {
+                format!(
+                    "## Prior review for {}\nSaved from: {}\n\n{}",
+                    pull_request.url, prior_review.url, prior_review.content
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if !prior_pull_request_reviews.is_empty() {
+        targets.push(format!(
+            "Prior pull-request review comments from an earlier review run:\n\n{}",
+            prior_pull_request_reviews.join("\n\n")
+        ));
+    }
+    let mut seen_prior_reviews = HashSet::new();
+    let prior_reviews = documents
+        .iter()
+        .filter_map(|document| document.prior_review.as_ref())
+        .filter(|prior_review| seen_prior_reviews.insert(prior_review.path.clone()))
+        .map(|prior_review| {
+            format!(
+                "## Prior review\nSaved from: {}\n\n{}",
+                prior_review.path.display(),
+                prior_review.content
+            )
+        })
+        .collect::<Vec<_>>();
+    if !prior_reviews.is_empty() {
+        targets.push(format!(
+            "Prior document review from an earlier review run:\n\n{}",
+            prior_reviews.join("\n\n")
+        ));
     }
     let mut outcomes = Vec::new();
     if !pull_requests.is_empty() {
@@ -2190,65 +2726,136 @@ actionable inline comments when appropriate.",
     }
     if !documents.is_empty() {
         outcomes.push(
-            "For the local documents, submit the completed review as a comment on the \
-related GitHub issue using `gh issue comment`. Identify each reviewed file by its \
-path and organize findings by severity. Do not modify the reviewed documents.",
+            "For the listed documents, return the complete review as the final response in \
+Markdown. Identify each reviewed document by its path or URL and organize findings by severity. \
+Telemachus will save that final response to a local review file. Do not post the \
+document review to GitHub and do not modify the reviewed documents. If a \
+section labeled `Prior review` is present, use it as historical context and call \
+out findings that are resolved, still present, or newly introduced.",
         );
     }
+    let completion_instruction = match (pull_requests.is_empty(), documents.is_empty()) {
+        (false, false) => {
+            "Complete every pull-request submission on GitHub before exiting. Make the final \
+response the complete standalone document review that Telemachus should save and \
+show to the user."
+        }
+        (false, true) => {
+            "Do not merely print the pull-request review: complete every GitHub submission \
+described above before exiting."
+        }
+        (true, false) => {
+            "Make the final response the complete standalone document review that \
+Telemachus should save and show to the user."
+        }
+        (true, true) => unreachable!("review prompt requires at least one artifact"),
+    };
+    let issue_context = issue
+        .map(|(issue, issue_url)| {
+            format!(
+                "Related GitHub issue ID: {}/{}#{}\nRelated GitHub issue URL: {}",
+                issue.owner, issue.repository, issue.number, issue_url
+            )
+        })
+        .unwrap_or_else(|| {
+            "No related GitHub issue was recorded for this task. Review the artifacts against \
+their own stated goals and, for pull requests, the PR description."
+                .into()
+        });
+    let retrieval_instruction = if issue.is_some() {
+        "Use the authenticated GitHub CLI to retrieve the issue and, for pull requests, \
+the description, commits, complete diff, existing discussion, and checks."
+    } else {
+        "For pull requests, use the authenticated GitHub CLI to retrieve the description, \
+commits, complete diff, existing discussion, and checks."
+    };
+    let satisfaction_target = if issue.is_some() {
+        "whether the implementation satisfies the issue"
+    } else {
+        "whether the implementation satisfies the stated artifact and pull-request goals"
+    };
     format!(
-        "Review the following artifact{} for the related issue.\n\n\
-Related GitHub issue ID: {}/{}#{}\n\
-Related GitHub issue URL: {}\n\n\
+        "Review the following artifact{}.\n\n\
 {}\n\n\
-Use the authenticated GitHub CLI to retrieve the issue and, for pull requests, \
-the description, commits, complete diff, existing discussion, and checks. Read \
-each listed local document directly from its absolute path. Clone or fetch \
+{}\n\n\
+{} Read \
+each listed local document directly from its absolute path and retrieve each web \
+document from its URL. Clone or fetch \
 repositories into this review workspace when source context is needed.\n\n\
 Review for correctness, regressions, security, data integrity, concurrency, error \
-handling, tests, maintainability, and whether the implementation satisfies the \
-issue. Do not change or push implementation code as part of this review.\n\n\
+handling, tests, maintainability, and {}. Do not change or push implementation \
+code as part of this review.\n\n\
+Classify every actionable finding using this rubric:\n\
+- P1: logic errors, major functionality gaps, major test gaps, and security issues.\n\
+- P2: minor functionality gaps, missing test corner cases, documentation misses, and missing error handling.\n\
+- P3: code style, naming issues, and micro-optimizations.\n\
+For every P2 or P3 finding, include it only when fixing it is worth the resulting code-maintenance cost. Do not inflate severity.\n\n\
 {}\n\n\
-Do not merely print the review: complete every applicable GitHub submission \
-described above before exiting.",
+{}",
         if pull_requests.len() + documents.len() == 1 {
             ""
         } else {
             "s"
         },
-        issue.owner,
-        issue.repository,
-        issue.number,
-        issue_url,
+        issue_context,
         targets.join("\n\n"),
-        outcomes.join("\n\n")
+        retrieval_instruction,
+        satisfaction_target,
+        outcomes.join("\n\n"),
+        completion_instruction
     )
 }
 
-fn codex_review_arguments(prompt: String) -> Vec<String> {
-    vec![
-        "-a".into(),
-        "never".into(),
-        "exec".into(),
+fn codex_review_arguments(
+    prompt: String,
+    resume_session_id: Option<&str>,
+    local_review_path: Option<&Path>,
+) -> Vec<String> {
+    let mut arguments = vec!["-a".into(), "never".into(), "exec".into()];
+    if resume_session_id.is_some() {
+        arguments.push("resume".into());
+    }
+    arguments.extend([
         "-m".into(),
         CODEX_REVIEW_MODEL.into(),
         "-c".into(),
         CODEX_REVIEW_REASONING_CONFIG.into(),
-        "-s".into(),
-        "workspace-write".into(),
+    ]);
+    if resume_session_id.is_none() {
+        arguments.extend(["-s".into(), "workspace-write".into()]);
+    }
+    arguments.extend([
         "-c".into(),
         "sandbox_workspace_write.network_access=true".into(),
-        prompt,
-    ]
+        "--json".into(),
+    ]);
+    if let Some(path) = local_review_path {
+        arguments.extend(["-o".into(), path.to_string_lossy().to_string()]);
+    }
+    if let Some(session_id) = resume_session_id {
+        arguments.push(session_id.into());
+    }
+    arguments.push(prompt);
+    arguments
 }
 
-fn claude_review_arguments(prompt: String) -> Vec<String> {
-    vec![
-        "-p".into(),
-        "--no-session-persistence".into(),
+fn claude_review_arguments(
+    prompt: String,
+    resume_session_id: Option<&str>,
+    new_session_id: &str,
+) -> Vec<String> {
+    let mut arguments = vec!["-p".into(), "--output-format".into(), "json".into()];
+    if let Some(session_id) = resume_session_id {
+        arguments.extend(["--resume".into(), session_id.into()]);
+    } else {
+        arguments.extend(["--session-id".into(), new_session_id.into()]);
+    }
+    arguments.extend([
         prompt,
         "--allowedTools".into(),
         "Bash,Read,Grep,Glob".into(),
-    ]
+    ]);
+    arguments
 }
 
 fn executable_on_path(name: &str) -> Option<PathBuf> {
@@ -2369,15 +2976,30 @@ struct GitHubReviewAuthor {
 
 #[derive(Debug, Deserialize)]
 struct GitHubPullRequestReview {
+    #[serde(default)]
+    body: Option<String>,
     html_url: String,
     submitted_at: Option<String>,
     user: GitHubReviewAuthor,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubPullRequestReviewComment {
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    path: String,
+    line: Option<u64>,
+    original_line: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
 struct ReviewResourceUpdate {
     state: String,
     review_url: Option<String>,
+    review_path: Option<String>,
+    review_provider: Option<String>,
+    review_session_id: Option<String>,
     error: Option<String>,
 }
 
@@ -2395,6 +3017,9 @@ fn review_updates(
                 ReviewResourceUpdate {
                     state: state.into(),
                     review_url: review_urls.get(target).cloned(),
+                    review_path: None,
+                    review_provider: None,
+                    review_session_id: None,
                     error: error.map(str::to_string),
                 },
             )
@@ -2429,7 +3054,11 @@ fn update_source_review_state(
         };
         let is_pull_request = match resource.resource_type.as_str() {
             "github_pr" => true,
-            "local_document" => false,
+            resource_type
+                if document_artifact_kind(resource_type, &resource.path_or_url).is_some() =>
+            {
+                false
+            }
             _ => continue,
         };
         if update.state != "queued"
@@ -2502,9 +3131,31 @@ fn update_source_review_state(
                     .metadata
                     .insert("review_url".into(), review_url.into());
             }
-            None => {
+            None if update.state == "posted" => {
                 resource.metadata.remove("review_url");
             }
+            None => {}
+        }
+        match update.review_path.as_deref() {
+            Some(review_path) => {
+                resource
+                    .metadata
+                    .insert("review_path".into(), review_path.into());
+            }
+            None if update.state == "posted" => {
+                resource.metadata.remove("review_path");
+            }
+            None => {}
+        }
+        if let Some(provider) = update.review_provider.as_deref() {
+            resource
+                .metadata
+                .insert("review_provider".into(), provider.into());
+        }
+        if let Some(session_id) = update.review_session_id.as_deref() {
+            resource
+                .metadata
+                .insert("review_session_id".into(), session_id.into());
         }
         match update.error.as_deref() {
             Some(error) => {
@@ -2630,64 +3281,184 @@ fn find_posted_review_urls(
     found
 }
 
-#[derive(Debug, Deserialize)]
-struct GitHubIssueComment {
-    html_url: String,
-    created_at: String,
-    user: GitHubReviewAuthor,
+fn local_review_root() -> PathBuf {
+    std::env::temp_dir().join("telemachus-document-reviews")
 }
 
-fn github_issue_comment_url(
-    issue: &GitHubIssueReference,
-    login: &str,
-    started_at: DateTime<Utc>,
-) -> Option<String> {
-    let endpoint = format!(
-        "repos/{}/{}/issues/{}/comments?per_page=100",
-        issue.owner, issue.repository, issue.number
-    );
-    let output = ProcessCommand::new("gh")
-        .args(["api", &endpoint])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let comments: Vec<GitHubIssueComment> = serde_json::from_slice(&output.stdout).ok()?;
-    comments
-        .into_iter()
-        .filter(|comment| comment.user.login.eq_ignore_ascii_case(login))
-        .filter_map(|comment| {
-            let created_at = DateTime::parse_from_rfc3339(&comment.created_at)
-                .ok()?
-                .with_timezone(&Utc);
-            (created_at >= started_at).then_some((created_at, comment.html_url))
-        })
-        .max_by_key(|(created_at, _)| *created_at)
-        .map(|(_, url)| url)
+fn create_local_review_output_path(
+    source_task_id: &str,
+    review_run_id: &str,
+) -> Result<PathBuf, String> {
+    validate_id(source_task_id)?;
+    validate_id(review_run_id)?;
+    let directory = local_review_root().join(source_task_id);
+    std::fs::create_dir_all(&directory).map_err(display_error)?;
+    Ok(directory.join(format!("{review_run_id}.md")))
 }
 
-fn find_posted_issue_comment_url(
-    issue: &GitHubIssueReference,
-    started_at: &str,
-    cancel_requested: &AtomicBool,
-) -> Option<String> {
-    let login = github_authenticated_login()?;
-    let started_at = DateTime::parse_from_rfc3339(started_at)
-        .ok()?
-        .with_timezone(&Utc);
-    for attempt in 0..6 {
-        if cancel_requested.load(Ordering::SeqCst) {
-            return None;
+fn local_review_has_content(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_LOCAL_REVIEW_BYTES {
+        return false;
+    }
+    std::fs::read_to_string(path).is_ok_and(|review| !review.trim().is_empty())
+}
+
+#[derive(Debug, Default)]
+struct ReviewerProcessOutput {
+    session_id: Option<String>,
+    final_response: Option<String>,
+}
+
+fn parse_reviewer_process_output(
+    reviewer: ReviewProvider,
+    output_path: &Path,
+) -> ReviewerProcessOutput {
+    let Ok(output) = std::fs::read_to_string(output_path) else {
+        return ReviewerProcessOutput::default();
+    };
+    match reviewer {
+        ReviewProvider::Claude => {
+            let Ok(value) = serde_json::from_str::<Value>(&output) else {
+                return ReviewerProcessOutput::default();
+            };
+            ReviewerProcessOutput {
+                session_id: value
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                final_response: value
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            }
         }
-        if let Some(url) = github_issue_comment_url(issue, &login, started_at) {
-            return Some(url);
-        }
-        if attempt < 5 {
-            thread::sleep(Duration::from_secs(2));
+        ReviewProvider::Codex => {
+            let mut parsed = ReviewerProcessOutput::default();
+            for line in output.lines() {
+                let Ok(value) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                if value.get("type").and_then(Value::as_str) == Some("thread.started") {
+                    parsed.session_id = value
+                        .get("thread_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                }
+                let item = value.get("item");
+                if value.get("type").and_then(Value::as_str) == Some("item.completed")
+                    && item
+                        .and_then(|item| item.get("type"))
+                        .and_then(Value::as_str)
+                        == Some("agent_message")
+                {
+                    parsed.final_response = item
+                        .and_then(|item| item.get("text"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                }
+            }
+            parsed
         }
     }
-    None
+}
+
+fn common_review_session(resources: &[&Resource], reviewer: ReviewProvider) -> Option<String> {
+    let provider = reviewer.label().to_ascii_lowercase();
+    let mut sessions = resources.iter().map(|resource| {
+        (resource.metadata.get("review_provider") == Some(&provider))
+            .then(|| resource.metadata.get("review_session_id").cloned())
+            .flatten()
+    });
+    let first = sessions.next()??;
+    sessions
+        .all(|session| session.as_deref() == Some(first.as_str()))
+        .then_some(first)
+}
+
+fn validate_local_review_path(target: &str) -> Result<PathBuf, String> {
+    let target = PathBuf::from(target);
+    if !target.is_absolute() {
+        return Err("review_path_must_be_absolute".into());
+    }
+    let root = local_review_root()
+        .canonicalize()
+        .map_err(|_| "review_directory_not_found".to_string())?;
+    let target = target
+        .canonicalize()
+        .map_err(|_| "review_file_not_found".to_string())?;
+    if !target.starts_with(&root)
+        || target.extension().and_then(|extension| extension.to_str()) != Some("md")
+        || !target.is_file()
+    {
+        return Err("invalid_review_path".into());
+    }
+    let size = target.metadata().map_err(display_error)?.len();
+    if size > MAX_LOCAL_REVIEW_BYTES {
+        return Err("review_file_too_large".into());
+    }
+    Ok(target)
+}
+
+fn read_local_review_file(review_path: &str) -> Result<String, String> {
+    let path = validate_local_review_path(review_path)?;
+    std::fs::read_to_string(path).map_err(display_error)
+}
+
+fn load_prior_local_document_review(
+    resource: &Resource,
+    cache: &mut HashMap<PathBuf, String>,
+    context_bytes: &mut usize,
+) -> Result<Option<PriorLocalDocumentReview>, String> {
+    let Some(review_path) = resource.metadata.get("review_path") else {
+        return Ok(None);
+    };
+    let path = validate_local_review_path(review_path)?;
+    let content = match cache.get(&path) {
+        Some(content) => content.clone(),
+        None => {
+            let content = std::fs::read_to_string(&path).map_err(display_error)?;
+            *context_bytes = context_bytes.saturating_add(content.len());
+            if *context_bytes > MAX_PRIOR_REVIEW_CONTEXT_BYTES {
+                return Err("prior_review_context_too_large".into());
+            }
+            cache.insert(path.clone(), content.clone());
+            content
+        }
+    };
+    Ok(Some(PriorLocalDocumentReview { path, content }))
+}
+
+#[tauri::command]
+fn copy_local_review(review_path: String) -> Result<(), String> {
+    let review = read_local_review_file(&review_path)?;
+    #[cfg(target_os = "macos")]
+    {
+        let mut child = ProcessCommand::new("/usr/bin/pbcopy")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(display_error)?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| "clipboard_stdin_unavailable".to_string())?
+            .write_all(review.as_bytes())
+            .map_err(display_error)?;
+        if child.wait().map_err(display_error)?.success() {
+            Ok(())
+        } else {
+            Err("clipboard_write_failed".into())
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = review;
+        Err("clipboard_not_supported".into())
+    }
 }
 
 fn finish_active_review(state: &AppState, review_run_id: &str, review_workspace: &Path) {
@@ -2706,9 +3477,11 @@ fn watch_review(
     review_run_id: String,
     pull_requests: Vec<GitHubPullRequestReference>,
     documents: Vec<LocalDocumentReviewReference>,
-    issue: GitHubIssueReference,
     started_at: String,
     review_workspace: PathBuf,
+    local_review_path: Option<PathBuf>,
+    reviewer_output_path: PathBuf,
+    reviewer_session_hint: Option<String>,
 ) {
     let _ = thread::Builder::new()
         .name(format!("review-{review_run_id}"))
@@ -2726,11 +3499,17 @@ fn watch_review(
             };
 
             if cancel_requested.load(Ordering::SeqCst) {
+                if let Some(path) = &local_review_path {
+                    let _ = std::fs::remove_file(path);
+                }
                 finish_active_review(&state, &review_run_id, &review_workspace);
                 return;
             }
 
             if !succeeded {
+                if let Some(path) = &local_review_path {
+                    let _ = std::fs::remove_file(path);
+                }
                 let targets = pull_requests
                     .iter()
                     .map(|pull_request| pull_request.url.clone())
@@ -2760,36 +3539,43 @@ fn watch_review(
                 return;
             }
 
-            let mut review_urls =
+            let mut reviewer_output =
+                parse_reviewer_process_output(reviewer, &reviewer_output_path);
+            if reviewer_output.session_id.is_none() {
+                reviewer_output.session_id = reviewer_session_hint;
+            }
+            if let (Some(path), Some(final_response)) = (
+                &local_review_path,
+                reviewer_output.final_response.as_deref(),
+            ) {
+                if !local_review_has_content(path) {
+                    let _ = std::fs::write(path, final_response);
+                }
+            }
+            let review_urls =
                 find_posted_review_urls(&pull_requests, &started_at, &cancel_requested);
-            if !documents.is_empty() {
-                if let Some(issue_comment_url) =
-                    find_posted_issue_comment_url(&issue, &started_at, &cancel_requested)
-                {
-                    for document in &documents {
-                        review_urls.insert(document.source_path.clone(), issue_comment_url.clone());
-                    }
+            let local_review_result_path = local_review_path
+                .as_deref()
+                .filter(|path| local_review_has_content(path))
+                .map(|path| path.to_string_lossy().to_string());
+            if local_review_result_path.is_none() {
+                if let Some(path) = &local_review_path {
+                    let _ = std::fs::remove_file(path);
                 }
             }
             if cancel_requested.load(Ordering::SeqCst) {
+                if let Some(path) = &local_review_path {
+                    let _ = std::fs::remove_file(path);
+                }
                 finish_active_review(&state, &review_run_id, &review_workspace);
                 return;
             }
-            let targets = pull_requests
+            let mut updates = pull_requests
                 .iter()
-                .map(|pull_request| pull_request.url.clone())
-                .chain(
-                    documents
-                        .iter()
-                        .map(|document| document.source_path.clone()),
-                )
-                .collect::<Vec<_>>();
-            let updates = targets
-                .iter()
-                .map(|target| {
-                    let review_url = review_urls.get(target).cloned();
+                .map(|pull_request| {
+                    let review_url = review_urls.get(&pull_request.url).cloned();
                     (
-                        target.clone(),
+                        pull_request.url.clone(),
                         ReviewResourceUpdate {
                             state: if review_url.is_some() {
                                 "posted".into()
@@ -2797,7 +3583,13 @@ fn watch_review(
                                 "failed".into()
                             },
                             review_url,
-                            error: (!review_urls.contains_key(target)).then(|| {
+                            review_path: None,
+                            review_provider: reviewer_output
+                                .session_id
+                                .as_ref()
+                                .map(|_| reviewer.label().to_ascii_lowercase()),
+                            review_session_id: reviewer_output.session_id.clone(),
+                            error: (!review_urls.contains_key(&pull_request.url)).then(|| {
                                 format!(
                                     "{} finished, but no newly posted GitHub review was found.",
                                     reviewer.label()
@@ -2806,7 +3598,32 @@ fn watch_review(
                         },
                     )
                 })
-                .collect();
+                .collect::<HashMap<_, _>>();
+            for document in &documents {
+                updates.insert(
+                    document.source_path.clone(),
+                    ReviewResourceUpdate {
+                        state: if local_review_result_path.is_some() {
+                            "posted".into()
+                        } else {
+                            "failed".into()
+                        },
+                        review_url: None,
+                        review_path: local_review_result_path.clone(),
+                        review_provider: reviewer_output
+                            .session_id
+                            .as_ref()
+                            .map(|_| reviewer.label().to_ascii_lowercase()),
+                        review_session_id: reviewer_output.session_id.clone(),
+                        error: local_review_result_path.is_none().then(|| {
+                            format!(
+                                "{} finished, but no local review output was produced.",
+                                reviewer.label()
+                            )
+                        }),
+                    },
+                );
+            }
             let _ = update_source_review_state(
                 &state,
                 &source_task_id,
@@ -2909,12 +3726,22 @@ fn launch_artifact_review_core(
         return Err("review_requires_one_to_twenty_artifacts".into());
     }
     let source_document = get_document_core(state, &source_task_id)?;
-    let source_issue = github_issue_reference(&source_document.header.issue_url)
-        .map_err(|_| "task_github_issue_required".to_string())?;
-    let requested_issue = github_issue_reference(&issue_url)?;
-    if source_issue != requested_issue {
-        return Err("task_github_issue_mismatch".into());
-    }
+    let source_issue_url = source_document.header.issue_url.trim();
+    let requested_issue_url = issue_url.trim();
+    let requested_issue = if source_issue_url.is_empty() && requested_issue_url.is_empty() {
+        None
+    } else {
+        if source_issue_url.is_empty() || requested_issue_url.is_empty() {
+            return Err("task_github_issue_mismatch".into());
+        }
+        let source_issue = github_issue_reference(source_issue_url)
+            .map_err(|_| "task_github_issue_invalid".to_string())?;
+        let requested_issue = github_issue_reference(requested_issue_url)?;
+        if source_issue != requested_issue {
+            return Err("task_github_issue_mismatch".into());
+        }
+        Some(requested_issue)
+    };
     let source_artifacts = source_document
         .resources
         .iter()
@@ -2931,11 +3758,12 @@ fn launch_artifact_review_core(
 
     let mut seen = HashSet::new();
     let mut pull_requests = Vec::new();
+    let mut prior_review_context_bytes = 0usize;
     for pr_url in pr_urls {
-        if !source_artifacts.contains_key(&("github_pr", pr_url.as_str())) {
-            return Err("review_artifact_not_found_in_source_task".into());
-        }
-        let reference = github_pull_request_reference(&pr_url)?;
+        let source_artifact = source_artifacts
+            .get(&("github_pr", pr_url.as_str()))
+            .ok_or_else(|| "review_artifact_not_found_in_source_task".to_string())?;
+        let mut reference = github_pull_request_reference(&pr_url)?;
         let identity = format!(
             "{}/{}#{}",
             reference.owner.to_ascii_lowercase(),
@@ -2943,25 +3771,54 @@ fn launch_artifact_review_core(
             reference.number
         );
         if seen.insert(identity) {
+            reference.prior_review = source_artifact
+                .metadata
+                .get("review_url")
+                .and_then(|review_url| load_prior_github_review(&reference, review_url));
+            if let Some(prior_review) = &reference.prior_review {
+                prior_review_context_bytes =
+                    prior_review_context_bytes.saturating_add(prior_review.content.len());
+                if prior_review_context_bytes > MAX_PRIOR_REVIEW_CONTEXT_BYTES {
+                    return Err("prior_review_context_too_large".into());
+                }
+            }
             pull_requests.push(reference);
         }
     }
     let mut documents = Vec::new();
+    let mut prior_review_cache = HashMap::<PathBuf, String>::new();
     for document_path in document_paths {
-        if !source_artifacts.contains_key(&("local_document", document_path.as_str())) {
-            return Err("review_artifact_not_found_in_source_task".into());
-        }
+        let source_artifact = source_document
+            .resources
+            .iter()
+            .find(|resource| {
+                resource.path_or_url == document_path
+                    && document_artifact_kind(&resource.resource_type, &resource.path_or_url)
+                        .is_some()
+            })
+            .ok_or_else(|| "review_artifact_not_found_in_source_task".to_string())?;
         if !seen.insert(format!("document:{document_path}")) {
             continue;
         }
-        let ArtifactTarget::LocalDocument(canonical_path) =
-            validate_artifact_target("local_document", &document_path)?
-        else {
-            return Err("review_document_invalid".into());
+        let (review_target, web) = match resolve_document_artifact(
+            state,
+            Some(&source_task_id),
+            &source_artifact.resource_type,
+            &document_path,
+        )? {
+            ArtifactTarget::LocalDocument(path) => (path.to_string_lossy().to_string(), false),
+            ArtifactTarget::Web(url) => (url, true),
         };
+        let prior_review = load_prior_local_document_review(
+            source_artifact,
+            &mut prior_review_cache,
+            &mut prior_review_context_bytes,
+        )?;
         documents.push(LocalDocumentReviewReference {
             source_path: document_path,
-            canonical_path,
+            review_target,
+            web,
+            prior_review,
         });
     }
 
@@ -2971,6 +3828,26 @@ fn launch_artifact_review_core(
     };
     let review_workspace = create_codex_review_workspace()?;
     let review_run_id = Uuid::new_v4().to_string();
+    let local_review_path = if documents.is_empty() {
+        None
+    } else {
+        let path = match create_local_review_output_path(&source_task_id, &review_run_id) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&review_workspace);
+                return Err(error);
+            }
+        };
+        let output = match File::create(&path) {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&review_workspace);
+                return Err(display_error(error));
+            }
+        };
+        drop(output);
+        Some(path)
+    };
     let timestamp = now();
     let targets = pull_requests
         .iter()
@@ -2981,6 +3858,31 @@ fn launch_artifact_review_core(
                 .map(|document| document.source_path.clone()),
         )
         .collect::<Vec<_>>();
+    let selected_source_resources = targets
+        .iter()
+        .filter_map(|target| {
+            source_document
+                .resources
+                .iter()
+                .find(|resource| resource.path_or_url == *target)
+        })
+        .collect::<Vec<_>>();
+    let resume_session_id = common_review_session(&selected_source_resources, reviewer);
+    let new_claude_session_id = Uuid::new_v4().to_string();
+    let reviewer_session_hint = resume_session_id
+        .clone()
+        .or_else(|| (reviewer == ReviewProvider::Claude).then_some(new_claude_session_id.clone()));
+    let reviewer_output_path = review_workspace.join("reviewer-output.json");
+    let reviewer_stdout = match File::create(&reviewer_output_path) {
+        Ok(output) => Stdio::from(output),
+        Err(error) => {
+            if let Some(path) = &local_review_path {
+                let _ = std::fs::remove_file(path);
+            }
+            let _ = std::fs::remove_dir_all(&review_workspace);
+            return Err(display_error(error));
+        }
+    };
     let queued_updates = review_updates(&targets, "queued", &HashMap::new(), None);
     if let Err(error) = update_source_review_state(
         state,
@@ -2989,20 +3891,35 @@ fn launch_artifact_review_core(
         &timestamp,
         &queued_updates,
     ) {
+        if let Some(path) = &local_review_path {
+            let _ = std::fs::remove_file(path);
+        }
         let _ = std::fs::remove_dir_all(review_workspace);
         return Err(error);
     }
 
-    let prompt = review_prompt(&pull_requests, &documents, &requested_issue, &issue_url);
+    let prompt = review_prompt(
+        &pull_requests,
+        &documents,
+        requested_issue
+            .as_ref()
+            .map(|issue| (issue, requested_issue_url)),
+    );
     let reviewer_arguments = match reviewer {
-        ReviewProvider::Codex => codex_review_arguments(prompt),
-        ReviewProvider::Claude => claude_review_arguments(prompt),
+        ReviewProvider::Codex => codex_review_arguments(
+            prompt,
+            resume_session_id.as_deref(),
+            local_review_path.as_deref(),
+        ),
+        ReviewProvider::Claude => {
+            claude_review_arguments(prompt, resume_session_id.as_deref(), &new_claude_session_id)
+        }
     };
     let child = match ProcessCommand::new(reviewer_path)
         .args(reviewer_arguments)
         .current_dir(&review_workspace)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(reviewer_stdout)
         .stderr(Stdio::null())
         .env_remove("NO_COLOR")
         .spawn()
@@ -3025,6 +3942,9 @@ fn launch_artifact_review_core(
                 &timestamp,
                 &failed_updates,
             );
+            if let Some(path) = &local_review_path {
+                let _ = std::fs::remove_file(path);
+            }
             let _ = std::fs::remove_dir_all(review_workspace);
             return Err(display_error(error));
         }
@@ -3053,6 +3973,9 @@ fn launch_artifact_review_core(
         if let Ok(mut child) = child.lock() {
             let _ = child.kill();
         }
+        if let Some(path) = &local_review_path {
+            let _ = std::fs::remove_file(path);
+        }
         finish_active_review(state, &review_run_id, &review_workspace);
         return Err(error);
     }
@@ -3065,16 +3988,27 @@ fn launch_artifact_review_core(
         review_run_id.clone(),
         pull_requests,
         documents,
-        requested_issue,
         timestamp,
         review_workspace,
+        local_review_path,
+        reviewer_output_path,
+        reviewer_session_hint,
     );
     Ok(review_run_id)
 }
 
 #[tauri::command]
-fn open_artifact(artifact_type: String, target: String) -> Result<(), String> {
-    let artifact = validate_artifact_target(&artifact_type, &target)?;
+fn open_artifact(
+    state: tauri::State<'_, Arc<AppState>>,
+    task_id: Option<String>,
+    artifact_type: String,
+    target: String,
+) -> Result<(), String> {
+    let artifact = if artifact_type == "github_pr" {
+        validate_artifact_target(&artifact_type, &target)?
+    } else {
+        resolve_document_artifact(&state, task_id.as_deref(), &artifact_type, &target)?
+    };
     #[cfg(target_os = "macos")]
     let status = match artifact {
         ArtifactTarget::LocalDocument(path) => ProcessCommand::new("/usr/bin/open")
@@ -3477,6 +4411,10 @@ pub fn run() {
             apply_operation,
             answer_question,
             complete_todo,
+            set_todo_completed,
+            dismiss_todo,
+            clear_all_alerts,
+            dismiss_all_todos,
             update_layout,
             get_scratchpad,
             update_scratchpad,
@@ -3486,6 +4424,8 @@ pub fn run() {
             resize_terminal,
             close_terminal,
             open_artifact,
+            copy_local_review,
+            get_workspace_context,
             get_closed_github_pull_requests,
             discover_open_github_pull_requests,
             launch_artifact_review,
@@ -3574,6 +4514,61 @@ mod tests {
     }
 
     #[test]
+    fn note_artifacts_infer_document_targets() {
+        assert_eq!(
+            document_artifact_kind("note", "plans/issue127-set-based-ingest-staging.md"),
+            Some(DocumentArtifactKind::Local)
+        );
+        assert_eq!(
+            document_artifact_kind("note", "https://example.com/design"),
+            Some(DocumentArtifactKind::Web)
+        );
+        assert_eq!(document_artifact_kind("note", "Remember the rollout"), None);
+
+        let state = AppState::in_memory();
+        let directory = tempfile::tempdir().unwrap();
+        let relative = "plans/issue127-set-based-ingest-staging.md";
+        std::fs::create_dir(directory.path().join("plans")).unwrap();
+        std::fs::write(directory.path().join(relative), "# Plan").unwrap();
+        let task =
+            create_task_core(&state, Some(directory.path().to_string_lossy().to_string())).unwrap();
+        assert!(matches!(
+            resolve_document_artifact(&state, Some(&task.id), "note", relative).unwrap(),
+            ArtifactTarget::LocalDocument(path) if path == directory.path().join(relative).canonicalize().unwrap()
+        ));
+        assert!(matches!(
+            resolve_document_artifact(
+                &state,
+                Some(&task.id),
+                "note",
+                "https://example.com/design"
+            )
+            .unwrap(),
+            ArtifactTarget::Web(url) if url == "https://example.com/design"
+        ));
+    }
+
+    #[test]
+    fn agent_sessions_map_to_provider_resume_commands() {
+        let session = |provider, session_id: &str| AgentSession {
+            provider,
+            session_id: session_id.into(),
+            cwd: "/tmp".into(),
+            model: String::new(),
+            start_source: String::new(),
+            updated_at: now(),
+        };
+        assert_eq!(
+            agent_resume_arguments(&session(AgentProvider::Codex, "codex-session")),
+            vec!["resume", "codex-session"]
+        );
+        assert_eq!(
+            agent_resume_arguments(&session(AgentProvider::Claude, "claude-session")),
+            vec!["--resume", "claude-session"]
+        );
+    }
+
+    #[test]
     fn terminal_output_discovers_and_canonicalizes_pull_request_links() {
         let output = concat!(
             "\u{1b}[32mCreated https://github.com/openai/codex/pull/123\u{1b}[0m\n",
@@ -3594,29 +4589,62 @@ mod tests {
     #[test]
     fn reviewer_launch_is_issue_grounded_and_uses_expected_cli_modes() {
         let issue = github_issue_reference("https://github.com/openai/codex/issues/456").unwrap();
-        let pull_requests = vec![
+        let mut pull_requests = vec![
             github_pull_request_reference("https://github.com/openai/codex/pull/123").unwrap(),
             github_pull_request_reference("https://github.com/openai/codex/pull/124").unwrap(),
         ];
-        let documents = vec![LocalDocumentReviewReference {
-            source_path: "/tmp/plan.md".into(),
-            canonical_path: PathBuf::from("/tmp/plan.md"),
-        }];
+        pull_requests[0].prior_review = Some(PriorGitHubReview {
+            url: "https://github.com/openai/codex/pull/123#pullrequestreview-456".into(),
+            content: "Inline comments:\n- src/lib.rs:12: Preserve this finding.".into(),
+        });
+        let documents = vec![
+            LocalDocumentReviewReference {
+                source_path: "/tmp/plan.md".into(),
+                review_target: "/tmp/plan.md".into(),
+                web: false,
+                prior_review: Some(PriorLocalDocumentReview {
+                    path: PathBuf::from("/tmp/prior-review.md"),
+                    content: "# Prior findings\n\n- Existing issue.".into(),
+                }),
+            },
+            LocalDocumentReviewReference {
+                source_path: "https://example.com/design".into(),
+                review_target: "https://example.com/design".into(),
+                web: true,
+                prior_review: None,
+            },
+        ];
         let prompt = review_prompt(
             &pull_requests,
             &documents,
-            &issue,
-            "https://github.com/openai/codex/issues/456",
+            Some((&issue, "https://github.com/openai/codex/issues/456")),
         );
         assert!(prompt.contains("openai/codex#456"));
         assert!(prompt.contains("https://github.com/openai/codex/pull/123"));
         assert!(prompt.contains("https://github.com/openai/codex/pull/124"));
         assert!(prompt.contains("/tmp/plan.md"));
+        assert!(prompt.contains("Web documents:\n- https://example.com/design"));
         assert!(prompt.contains("submit the completed review on GitHub"));
-        assert!(prompt.contains("submit the completed review as a comment"));
-        assert!(prompt.contains("Do not merely print the review"));
+        assert!(prompt.contains("return the complete review as the final response in Markdown"));
+        assert!(prompt.contains("Do not post the document review to GitHub"));
+        assert!(!prompt.contains("gh issue comment"));
+        assert!(prompt.contains("Complete every pull-request submission"));
+        assert!(prompt.contains("## Prior review"));
+        assert!(prompt.contains("# Prior findings"));
+        assert!(prompt.contains("resolved, still present, or newly introduced"));
+        assert!(prompt.contains("Prior pull-request review comments"));
+        assert!(prompt.contains("Preserve this finding"));
+        assert!(prompt.contains("P1: logic errors, major functionality gaps"));
+        assert!(prompt.contains("P2: minor functionality gaps"));
+        assert!(prompt.contains("P3: code style, naming issues"));
+        assert!(prompt.contains("worth the resulting code-maintenance cost"));
 
-        let arguments = codex_review_arguments(prompt);
+        let prompt_without_issue = review_prompt(&pull_requests, &documents, None);
+        assert!(prompt_without_issue.contains("No related GitHub issue was recorded"));
+        assert!(prompt_without_issue.contains("PR description"));
+        assert!(!prompt_without_issue.contains("retrieve the issue"));
+
+        let arguments = codex_review_arguments(prompt, None, None);
         assert_eq!(
             arguments
                 .iter()
@@ -3644,12 +4672,35 @@ mod tests {
         assert!(!arguments
             .iter()
             .any(|argument| argument == "--dangerously-bypass-approvals-and-sandbox"));
+        assert!(arguments.iter().any(|argument| argument == "--json"));
 
-        let claude_arguments = claude_review_arguments("Review this".into());
+        let resumed_arguments = codex_review_arguments(
+            "Review again".into(),
+            Some("019c1234-1234-7123-8123-123456789abc"),
+            None,
+        );
+        assert!(resumed_arguments
+            .windows(2)
+            .any(|pair| pair == ["exec", "resume"]));
+        assert!(resumed_arguments
+            .iter()
+            .any(|argument| argument == "019c1234-1234-7123-8123-123456789abc"));
+
+        let claude_arguments = claude_review_arguments(
+            "Review this".into(),
+            None,
+            "00000000-0000-4000-8000-000000000001",
+        );
         assert_eq!(claude_arguments.first().map(String::as_str), Some("-p"));
-        assert!(claude_arguments
+        assert!(!claude_arguments
             .iter()
             .any(|argument| argument == "--no-session-persistence"));
+        assert!(claude_arguments
+            .windows(2)
+            .any(|pair| pair == ["--output-format", "json"]));
+        assert!(claude_arguments
+            .windows(2)
+            .any(|pair| pair == ["--session-id", "00000000-0000-4000-8000-000000000001"]));
         assert!(claude_arguments
             .windows(2)
             .any(|pair| pair == ["--allowedTools", "Bash,Read,Grep,Glob"]));
@@ -3665,6 +4716,15 @@ mod tests {
         assert!(!claude_arguments
             .iter()
             .any(|argument| argument == "--dangerously-skip-permissions"));
+
+        let resumed_claude_arguments = claude_review_arguments(
+            "Review again".into(),
+            Some("00000000-0000-4000-8000-000000000002"),
+            "unused",
+        );
+        assert!(resumed_claude_arguments
+            .windows(2)
+            .any(|pair| { pair == ["--resume", "00000000-0000-4000-8000-000000000002"] }));
         assert_eq!(
             serde_json::from_str::<ReviewProvider>("\"codex\"").unwrap(),
             ReviewProvider::Codex
@@ -3679,6 +4739,47 @@ mod tests {
             .join(Uuid::new_v4().to_string());
         assert!(is_codex_review_workspace(&review_path));
         assert!(!is_codex_review_workspace(Path::new("/tmp")));
+    }
+
+    #[test]
+    fn local_review_files_are_scoped_and_bounded() {
+        let task_id = Uuid::new_v4().to_string();
+        let review_run_id = Uuid::new_v4().to_string();
+        let review_path = create_local_review_output_path(&task_id, &review_run_id).unwrap();
+        std::fs::write(&review_path, "# Review\n\nNo findings.\n").unwrap();
+
+        assert!(local_review_has_content(&review_path));
+        assert_eq!(
+            read_local_review_file(&review_path.to_string_lossy()).unwrap(),
+            "# Review\n\nNo findings.\n"
+        );
+        let resource = Resource {
+            id: "plan".into(),
+            resource_type: "local_document".into(),
+            label: "Plan".into(),
+            path_or_url: "/tmp/plan.md".into(),
+            status: ResourceStatus::Generated,
+            metadata: HashMap::from([(
+                "review_path".into(),
+                review_path.to_string_lossy().to_string(),
+            )]),
+        };
+        let mut cache = HashMap::new();
+        let mut context_bytes = 0;
+        let prior_review =
+            load_prior_local_document_review(&resource, &mut cache, &mut context_bytes)
+                .unwrap()
+                .unwrap();
+        assert_eq!(prior_review.content, "# Review\n\nNo findings.\n");
+        assert_eq!(context_bytes, prior_review.content.len());
+        load_prior_local_document_review(&resource, &mut cache, &mut context_bytes).unwrap();
+        assert_eq!(context_bytes, prior_review.content.len());
+        assert_eq!(
+            validate_local_review_path("/tmp/not-a-telemachus-review.md").unwrap_err(),
+            "review_file_not_found"
+        );
+
+        let _ = std::fs::remove_dir_all(local_review_root().join(task_id));
     }
 
     #[test]
@@ -3803,6 +4904,84 @@ mod tests {
     }
 
     #[test]
+    fn reviewer_output_and_common_sessions_support_resume() {
+        let output_path =
+            std::env::temp_dir().join(format!("reviewer-output-{}.jsonl", Uuid::new_v4()));
+        std::fs::write(
+            &output_path,
+            concat!(
+                "{\"type\":\"thread.started\",\"thread_id\":\"019c1234-1234-7123-8123-123456789abc\"}\n",
+                "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Done\"}}\n"
+            ),
+        )
+        .unwrap();
+        let output = parse_reviewer_process_output(ReviewProvider::Codex, &output_path);
+        assert_eq!(
+            output.session_id.as_deref(),
+            Some("019c1234-1234-7123-8123-123456789abc")
+        );
+        assert_eq!(output.final_response.as_deref(), Some("Done"));
+        let _ = std::fs::remove_file(output_path);
+
+        let resource = Resource {
+            id: "pr".into(),
+            resource_type: "github_pr".into(),
+            label: "PR".into(),
+            path_or_url: "https://github.com/openai/codex/pull/123".into(),
+            status: ResourceStatus::Reported,
+            metadata: HashMap::from([
+                ("review_provider".into(), "codex".into()),
+                (
+                    "review_session_id".into(),
+                    "019c1234-1234-7123-8123-123456789abc".into(),
+                ),
+            ]),
+        };
+        assert_eq!(
+            common_review_session(&[&resource], ReviewProvider::Codex).as_deref(),
+            Some("019c1234-1234-7123-8123-123456789abc")
+        );
+        assert_eq!(
+            common_review_session(&[&resource], ReviewProvider::Claude),
+            None
+        );
+    }
+
+    #[test]
+    fn clear_all_hides_alerts_and_dismisses_visible_todos() {
+        let state = AppState::in_memory();
+        let task = create_task_core(&state, None).unwrap();
+        apply_operation_core(
+            &state,
+            operation(
+                &task.id,
+                "raise_alert",
+                json!({"id":"risk","severity":"warning","title":"Risk","message":"Check it"}),
+            ),
+        )
+        .unwrap();
+        apply_operation_core(
+            &state,
+            operation(
+                &task.id,
+                "ask_user",
+                json!({"id":"deploy","text":"Deploy main","blocking":true}),
+            ),
+        )
+        .unwrap();
+        let alerts = clear_all_alerts_core(&state, task.id.clone()).unwrap();
+        assert!(alerts
+            .alerts
+            .iter()
+            .all(|alert| alert.state == AlertState::Cleared));
+        let todos = dismiss_all_todos_core(&state, task.id).unwrap();
+        assert!(todos
+            .questions
+            .iter()
+            .all(|todo| todo.state == QuestionState::Cancelled));
+    }
+
+    #[test]
     fn running_review_can_be_cancelled() {
         let state = AppState::in_memory();
         let task = create_task_core(&state, None).unwrap();
@@ -3919,6 +5098,37 @@ mod tests {
                 .map(String::as_str),
             Some("running")
         );
+
+        let review_path = create_local_review_output_path(&task.id, "review-run-1")
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let posted = HashMap::from([(
+            path.clone(),
+            ReviewResourceUpdate {
+                state: "posted".into(),
+                review_url: None,
+                review_path: Some(review_path.clone()),
+                review_provider: Some("codex".into()),
+                review_session_id: Some("review-session-1".into()),
+                error: None,
+            },
+        )]);
+        update_source_review_state(&state, &task.id, "review-run-1", &started_at, &posted).unwrap();
+        let document = get_document_core(&state, &task.id).unwrap();
+        assert_eq!(
+            document.resources[0].metadata.get("review_path"),
+            Some(&review_path)
+        );
+        assert_eq!(document.resources[0].metadata.get("review_url"), None);
+        assert_eq!(
+            document.resources[0]
+                .metadata
+                .get("review_count")
+                .map(String::as_str),
+            Some("1")
+        );
+        let _ = std::fs::remove_dir_all(local_review_root().join(&task.id));
     }
 
     #[test]
@@ -4118,10 +5328,10 @@ mod tests {
     }
 
     #[test]
-    fn question_answers_update_state_and_release_waiter_once() {
+    fn legacy_question_payloads_become_action_todos() {
         let state = AppState::in_memory();
         let task = create_task_core(&state, None).unwrap();
-        apply_operation_core(
+        let document = apply_operation_core(
             &state,
             operation(
                 &task.id,
@@ -4136,30 +5346,20 @@ mod tests {
             ),
         )
         .unwrap();
-
-        let (sender, receiver) = oneshot::channel();
-        state
-            .waiters
-            .lock()
-            .unwrap()
-            .insert(waiter_key(&task.id, "rollout"), sender);
-        let document =
-            answer_question_core(&state, task.id.clone(), "rollout".into(), "Canary".into())
-                .unwrap();
-
-        assert_eq!(document.questions[0].state, QuestionState::Answered);
-        assert_eq!(document.questions[0].answer.as_deref(), Some("Canary"));
-        let wait = receiver.blocking_recv().unwrap();
-        assert_eq!(wait.status, "answered");
-        assert_eq!(wait.answer.as_deref(), Some("Canary"));
+        assert_eq!(document.questions[0].kind, TodoKind::Action);
+        assert!(document.questions[0].choices.is_empty());
+        assert!(!document.questions[0].allow_free_text);
         assert_eq!(
-            answer_question_core(&state, task.id, "rollout".into(), "Again".into()).unwrap_err(),
-            "question_not_open"
+            answer_question_core(&state, task.id.clone(), "rollout".into(), "Canary".into())
+                .unwrap_err(),
+            "todo_is_not_question"
         );
+        let completed = complete_todo_core(&state, task.id, "rollout".into()).unwrap();
+        assert_eq!(completed.questions[0].state, QuestionState::Completed);
     }
 
     #[test]
-    fn action_todos_are_completed_by_the_human() {
+    fn action_todos_can_be_checked_reopened_and_dismissed() {
         let state = AppState::in_memory();
         let task = create_task_core(&state, None).unwrap();
         let document = apply_operation_core(
@@ -4200,9 +5400,43 @@ mod tests {
         let wait = receiver.blocking_recv().unwrap();
         assert_eq!(wait.status, "completed");
         assert_eq!(wait.answer, None);
-        assert_eq!(
-            complete_todo_core(&state, task.id, "deploy".into()).unwrap_err(),
-            "todo_not_open"
-        );
+        let reopened =
+            set_todo_completed_core(&state, task.id.clone(), "deploy".into(), false).unwrap();
+        assert_eq!(reopened.questions[0].state, QuestionState::Open);
+        assert!(has_attention(&reopened));
+        let dismissed = dismiss_todo_core(&state, task.id, "deploy".into()).unwrap();
+        assert_eq!(dismissed.questions[0].state, QuestionState::Cancelled);
+        assert!(!has_attention(&dismissed));
+    }
+
+    #[test]
+    fn dismissing_an_open_todo_cancels_its_waiter() {
+        let state = AppState::in_memory();
+        let task = create_task_core(&state, None).unwrap();
+        apply_operation_core(
+            &state,
+            operation(
+                &task.id,
+                "ask_user",
+                json!({
+                    "id": "deploy",
+                    "kind": "action",
+                    "text": "Deploy the release.",
+                    "blocking": true
+                }),
+            ),
+        )
+        .unwrap();
+        let (sender, receiver) = oneshot::channel();
+        state
+            .waiters
+            .lock()
+            .unwrap()
+            .insert(waiter_key(&task.id, "deploy"), sender);
+
+        dismiss_todo_core(&state, task.id, "deploy".into()).unwrap();
+        let wait = receiver.blocking_recv().unwrap();
+        assert_eq!(wait.status, "cancelled");
+        assert_eq!(wait.answer, None);
     }
 }

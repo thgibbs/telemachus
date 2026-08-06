@@ -82,9 +82,10 @@ function changedSection(
   if (!update.source || update.source === "human") return null;
   switch (update.op_type) {
     case "set_task":
-    case "set_task_status":
     case "set_agent_session":
       return "header";
+    case "set_task_status":
+      return "summary";
     case "replace_tasks":
     case "upsert_task":
       return "plan";
@@ -138,7 +139,11 @@ export function App() {
 
   const loadDocument = useCallback(async (taskId: string) => {
     const next = await getDocument(taskId);
-    setDocuments((current) => ({ ...current, [taskId]: next }));
+    setDocuments((current) =>
+      current[taskId] && current[taskId].revision > next.revision
+        ? current
+        : { ...current, [taskId]: next },
+    );
   }, []);
 
   useEffect(() => {

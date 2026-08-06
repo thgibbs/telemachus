@@ -75,13 +75,13 @@ export function SidebarMagnifier() {
     clone.removeAttribute("data-magnify");
     clone.setAttribute("aria-hidden", "true");
     clone.setAttribute("tabindex", "-1");
+    copyTypography(magnified.source, clone, 1.85);
     clone
       .querySelectorAll<HTMLElement>("[data-magnify-ignore]")
       .forEach((element) => element.remove());
     clone
       .querySelectorAll<HTMLElement>("a, button, input, select, textarea, [tabindex]")
       .forEach((element) => element.setAttribute("tabindex", "-1"));
-    copyTypography(magnified.source, clone, 1.85);
     cloneHost.current.replaceChildren(clone);
   }, [magnified]);
 

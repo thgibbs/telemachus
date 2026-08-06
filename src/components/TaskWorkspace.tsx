@@ -15,6 +15,7 @@ import {
   Edit3,
   ExternalLink,
   FileText,
+  GitBranch,
   GitPullRequest,
   Globe2,
   Info,
@@ -26,7 +27,7 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentSession,
   Alert,
@@ -37,15 +38,20 @@ import type {
   Resource,
   TaskSession,
   TaskStatus,
+  WorkspaceContext,
 } from "../types";
 import { statusLabel } from "../types";
 import {
-  answerQuestion,
   applyOperation,
-  completeTodo,
+  clearAllAlerts,
+  copyLocalReview,
+  dismissAllTodos,
+  dismissTodo,
   discoverOpenGithubPullRequests,
   getClosedGithubPullRequests,
+  getWorkspaceContext,
   openArtifact,
+  setTodoCompleted,
   updateLayout,
 } from "../lib/platform";
 import { Markdown } from "./Markdown";
@@ -74,15 +80,25 @@ const reviewerLabels: Record<ReviewProvider, string> = {
 
 type ReviewPane = "artifacts" | "prs";
 
-function savedReviewer(taskId: string, pane: ReviewPane): ReviewProvider {
+function savedReviewer(
+  taskId: string,
+  pane: ReviewPane,
+): ReviewProvider | null {
   try {
     const stored = JSON.parse(
       localStorage.getItem(reviewerPreferencesStorageKey) ?? "{}",
     ) as Record<string, Partial<Record<ReviewPane, ReviewProvider>>>;
-    return stored[taskId]?.[pane] === "claude" ? "claude" : "codex";
+    const reviewer = stored[taskId]?.[pane];
+    return reviewer === "codex" || reviewer === "claude" ? reviewer : null;
   } catch {
-    return "codex";
+    return null;
   }
+}
+
+function defaultReviewer(
+  session: AgentSession | null | undefined,
+): ReviewProvider {
+  return session?.provider === "codex" ? "claude" : "codex";
 }
 
 function storeReviewer(
@@ -139,6 +155,10 @@ function githubIssueLabel(value: string): string {
 }
 
 function githubPullRequestNumber(value: string): string | null {
+  return githubPullRequestIdentity(value)?.split("#").at(-1) ?? null;
+}
+
+function githubPullRequestIdentity(value: string): string | null {
   try {
     const url = new URL(value);
     const segments = url.pathname.split("/").filter(Boolean);
@@ -151,10 +171,38 @@ function githubPullRequestNumber(value: string): string | null {
     ) {
       return null;
     }
-    return segments[3];
+    return `${segments[0].toLowerCase()}/${segments[1].toLowerCase()}#${segments[3]}`;
   } catch {
     return null;
   }
+}
+
+function pullRequestDisplayPriority(resource: Resource): number {
+  const state = reportedReviewState(resource);
+  const reviewCount = Number.parseInt(resource.metadata.review_count ?? "0", 10);
+  return (
+    (activeReviewStates.has(state) ? 10_000 : 0) +
+    (state === "posted" ? 1_000 : 0) +
+    (Number.isSafeInteger(reviewCount) ? reviewCount : 0)
+  );
+}
+
+function dedupePullRequests(resources: Resource[]): Resource[] {
+  const deduped = new Map<string, Resource>();
+  for (const resource of resources) {
+    const identity =
+      githubPullRequestIdentity(resource.path_or_url) ??
+      resource.path_or_url.toLowerCase();
+    const current = deduped.get(identity);
+    if (
+      !current ||
+      pullRequestDisplayPriority(resource) >
+        pullRequestDisplayPriority(current)
+    ) {
+      deduped.set(identity, resource);
+    }
+  }
+  return [...deduped.values()];
 }
 
 function reportedGithubState(resource: Resource): string {
@@ -175,6 +223,39 @@ function isReportedClosedPullRequest(resource: Resource): boolean {
 
 function reportedReviewState(resource: Resource): string {
   return (resource.metadata.review_state ?? "").toLowerCase();
+}
+
+function documentArtifactType(
+  resource: Resource,
+): "local_document" | "web_document" | null {
+  if (resource.type === "local_document" || resource.type === "web_document") {
+    return resource.type;
+  }
+  const target = resource.path_or_url.trim();
+  if (
+    (resource.type === "note" ||
+      resource.type === "path" ||
+      resource.type === "url") &&
+    /^https?:\/\//i.test(target)
+  ) {
+    return "web_document";
+  }
+  if (
+    (resource.type === "note" || resource.type === "path") &&
+    (target.startsWith("/") ||
+      target.startsWith("./") ||
+      target.startsWith("../") ||
+      target.includes("/") ||
+      /\.[A-Za-z0-9]{1,12}$/.test(target))
+  ) {
+    return "local_document";
+  }
+  return null;
+}
+
+function presentedArtifact(resource: Resource): Resource {
+  const type = documentArtifactType(resource);
+  return type ? { ...resource, type } : resource;
 }
 
 function completedReviewCount(taskId: string, resource: Resource): number {
@@ -232,9 +313,7 @@ function isPlanDocument(resource: Resource): boolean {
     ""
   ).toLowerCase();
   if (explicitRole === "plan") return true;
-  if (
-    !["local_document", "web_document", "path"].includes(resource.type)
-  ) {
+  if (!documentArtifactType(resource)) {
     return false;
   }
   const searchable = `${resource.label} ${resource.path_or_url}`.toLowerCase();
@@ -275,7 +354,7 @@ function makeOperation(
   };
 }
 
-export function TaskWorkspace({
+function TaskWorkspaceComponent({
   task,
   document,
   active,
@@ -319,12 +398,19 @@ export function TaskWorkspace({
   const [reviewingArtifacts, setReviewingArtifacts] = useState(false);
   const [reviewingPullRequests, setReviewingPullRequests] = useState(false);
   const [artifactReviewer, setArtifactReviewer] = useState<ReviewProvider>(() =>
-    savedReviewer(task.id, "artifacts"),
+    savedReviewer(task.id, "artifacts") ??
+    defaultReviewer(document.header.agent_session),
   );
   const [pullRequestReviewer, setPullRequestReviewer] =
-    useState<ReviewProvider>(() => savedReviewer(task.id, "prs"));
+    useState<ReviewProvider>(
+      () =>
+        savedReviewer(task.id, "prs") ??
+        defaultReviewer(document.header.agent_session),
+    );
   const [artifactReviewError, setArtifactReviewError] = useState("");
   const [pullRequestReviewError, setPullRequestReviewError] = useState("");
+  const [workspaceContext, setWorkspaceContext] =
+    useState<WorkspaceContext | null>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const documentRevisionRef = useRef(document.revision);
   const pullRequestDiscoveryTimerRef = useRef<number | null>(null);
@@ -350,6 +436,16 @@ export function TaskWorkspace({
   };
 
   useEffect(() => setLayout(task.layout), [task.layout]);
+
+  useEffect(() => {
+    const reviewer = defaultReviewer(document.header.agent_session);
+    if (savedReviewer(task.id, "artifacts") === null) {
+      setArtifactReviewer(reviewer);
+    }
+    if (savedReviewer(task.id, "prs") === null) {
+      setPullRequestReviewer(reviewer);
+    }
+  }, [task.id, document.header.agent_session?.provider]);
 
   useEffect(() => {
     if (
@@ -500,9 +596,14 @@ export function TaskWorkspace({
     };
   }, [active, task.id]);
 
-  const openTodos = document.questions.filter((todo) => todo.state === "open");
+  const visibleTodos = document.questions.filter((todo) =>
+    ["open", "completed", "answered"].includes(todo.state),
+  );
   const activeAlerts = document.alerts.filter((a) => a.state !== "cleared");
-  const statusHeadline = document.summary.headline || "No status yet";
+  const statusHeadline =
+    document.header.status_message ||
+    document.summary.headline ||
+    "No status yet";
   const orderedTasks = [...document.tasks].sort((a, b) => a.order - b.order);
   const currentPlanItem =
     orderedTasks.find((item) => item.status === "in_progress") ??
@@ -532,24 +633,51 @@ export function TaskWorkspace({
   const githubPullRequests = document.resources.filter(
     (resource) => resource.type === "github_pr",
   );
-  const openPullRequests = visibleResources.filter(
-    (resource) => resource.type === "github_pr",
+  const openPullRequests = dedupePullRequests(
+    visibleResources.filter((resource) => resource.type === "github_pr"),
   );
   const reviewableArtifacts = artifacts.filter(
     (resource) =>
-      resource.type === "local_document" &&
+      documentArtifactType(resource) !== null &&
       !activeReviewStates.has(reportedReviewState(resource)),
+  ).map(presentedArtifact);
+  const hasActivePullRequestReview = openPullRequests.some((resource) =>
+    activeReviewStates.has(reportedReviewState(resource)),
   );
-  const reviewablePullRequests = openPullRequests.filter(
-    (resource) =>
-      !activeReviewStates.has(reportedReviewState(resource)),
-  );
+  const reviewablePullRequests = hasActivePullRequestReview
+    ? []
+    : openPullRequests;
+  const allOpenPullRequestsReviewed =
+    openPullRequests.length > 0 &&
+    openPullRequests.every(
+      (resource) => completedReviewCount(task.id, resource) > 0,
+    );
   const githubPullRequestSignature = githubPullRequests
     .map(
       (resource) =>
         `${resource.id}:${resource.path_or_url}:${reportedGithubState(resource)}`,
     )
     .join("|");
+
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    const refresh = () => {
+      void getWorkspaceContext(task.id)
+        .then((context) => {
+          if (!cancelled) setWorkspaceContext(context);
+        })
+        .catch(() => {
+          if (!cancelled) setWorkspaceContext(null);
+        });
+    };
+    refresh();
+    const interval = window.setInterval(refresh, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [active, document.header.agent_session?.cwd, task.id]);
 
   useEffect(() => {
     if (!active || githubPullRequests.length === 0) return;
@@ -645,6 +773,19 @@ export function TaskWorkspace({
                     icon={<Bell size={15} />}
                     title="Alerts"
                     count={activeAlerts.length}
+                    action={
+                      <button
+                        type="button"
+                        className="panel-clear-button"
+                        onClick={async () => {
+                          const next = await clearAllAlerts(task.id);
+                          onDocument(next);
+                          onTaskChanged();
+                        }}
+                      >
+                        Clear all
+                      </button>
+                    }
                   />
                   <div className="alert-list">
                     {activeAlerts.map((alert) => (
@@ -659,7 +800,7 @@ export function TaskWorkspace({
                 <div className="section-divider" />
               </>
             )}
-            {openTodos.length > 0 && (
+            {visibleTodos.length > 0 && (
               <>
                 <section
                   className="presentation-section"
@@ -668,24 +809,37 @@ export function TaskWorkspace({
                   <PanelHeading
                     icon={<ListTodo size={15} />}
                     title="To do"
-                    count={openTodos.length}
+                    count={visibleTodos.length}
+                    action={
+                      <button
+                        type="button"
+                        className="panel-clear-button"
+                        onClick={async () => {
+                          const next = await dismissAllTodos(task.id);
+                          onDocument(next);
+                          onTaskChanged();
+                        }}
+                      >
+                        Clear all
+                      </button>
+                    }
                   />
                   <div className="question-list">
-                    {openTodos.map((todo) => (
+                    {visibleTodos.map((todo) => (
                       <TodoCard
                         key={todo.id}
                         todo={todo}
-                        onAnswer={async (answer) => {
-                          const next = await answerQuestion(
+                        onCompletedChange={async (completed) => {
+                          const next = await setTodoCompleted(
                             task.id,
                             todo.id,
-                            answer,
+                            completed,
                           );
                           onDocument(next);
                           onTaskChanged();
                         }}
-                        onComplete={async () => {
-                          const next = await completeTodo(task.id, todo.id);
+                        onDismiss={async () => {
+                          const next = await dismissTodo(task.id, todo.id);
                           onDocument(next);
                           onTaskChanged();
                         }}
@@ -720,9 +874,22 @@ export function TaskWorkspace({
                   id={`status-content-${task.id}`}
                   className="status-accordion-content"
                 >
-                  {document.summary.headline ||
+                  {document.header.status_message ||
+                  document.summary.headline ||
                   document.summary.sections.length ? (
                     <div className="summary-block">
+                      {document.header.status_message && (
+                        <section data-magnify={document.header.status_message}>
+                          <Markdown>{document.header.status_message}</Markdown>
+                        </section>
+                      )}
+                      {document.summary.headline &&
+                        document.summary.headline !==
+                          document.header.status_message && (
+                          <section data-magnify={document.summary.headline}>
+                            <Markdown>{document.summary.headline}</Markdown>
+                          </section>
+                        )}
                       {document.summary.sections.map((section) => (
                         <section
                           key={section.id}
@@ -734,7 +901,13 @@ export function TaskWorkspace({
                           <Markdown>{section.body}</Markdown>
                         </section>
                       ))}
-                      <UpdatedAt value={document.summary.updated_at} />
+                      <UpdatedAt
+                        value={
+                          document.header.status_message
+                            ? document.updated_at
+                            : document.summary.updated_at
+                        }
+                      />
                     </div>
                   ) : (
                     <EmptyState
@@ -830,17 +1003,14 @@ export function TaskWorkspace({
                         className="panel-review-button"
                         disabled={
                           reviewingArtifacts ||
-                          reviewableArtifacts.length === 0 ||
-                          !issueIdentity
+                          reviewableArtifacts.length === 0
                         }
                         title={
-                          !issueIdentity
-                            ? "Add the task’s GitHub issue link before starting a review."
-                            : reviewableArtifacts.length === 0
-                              ? "All reviewable documents already have reviews running."
-                              : `Review ${reviewableArtifacts.length} document${
-                                  reviewableArtifacts.length === 1 ? "" : "s"
-                                } with ${reviewerLabels[artifactReviewer]}`
+                          reviewableArtifacts.length === 0
+                            ? "All reviewable documents already have reviews running."
+                            : `Review ${reviewableArtifacts.length} document${
+                                reviewableArtifacts.length === 1 ? "" : "s"
+                              } with ${reviewerLabels[artifactReviewer]}`
                         }
                         aria-label={`Review all eligible document artifacts with ${reviewerLabels[artifactReviewer]}`}
                         onClick={() => {
@@ -886,30 +1056,21 @@ export function TaskWorkspace({
                   />
                 ) : (
                   <div className="artifact-list">
-                    {artifacts.map((artifact) =>
-                      ["local_document", "web_document"].includes(
-                        artifact.type,
-                      ) ? (
+                    {artifacts.map((artifact) => {
+                      const presented = presentedArtifact(artifact);
+                      return documentArtifactType(artifact) ? (
                         <ArtifactCard
                           key={artifact.id}
                           taskId={task.id}
-                          resource={artifact}
-                          onReview={
-                            artifact.type === "local_document" && issueIdentity
-                              ? () =>
-                                  onLaunchReview(
-                                    [artifact],
-                                    issueUrl,
-                                    artifactReviewer,
-                                  )
-                              : undefined
+                          resource={presented}
+                          onReview={() =>
+                            onLaunchReview(
+                              [presented],
+                              issueUrl,
+                              artifactReviewer,
+                            )
                           }
                           reviewer={artifactReviewer}
-                          reviewDisabledReason={
-                            artifact.type === "local_document" && !issueIdentity
-                              ? "Add the task’s GitHub issue link before starting a review."
-                              : undefined
-                          }
                           onCancelReview={onCancelReview}
                         />
                       ) : (
@@ -917,8 +1078,8 @@ export function TaskWorkspace({
                           key={artifact.id}
                           resource={artifact}
                         />
-                      ),
-                    )}
+                      );
+                    })}
                   </div>
                 )}
               </section>
@@ -939,19 +1100,18 @@ export function TaskWorkspace({
                         className="panel-review-button"
                         disabled={
                           reviewingPullRequests ||
-                          reviewablePullRequests.length === 0 ||
-                          !issueIdentity
+                          reviewablePullRequests.length === 0
                         }
                         title={
-                          !issueIdentity
-                            ? "Add the task’s GitHub issue link before starting a review."
-                            : reviewablePullRequests.length === 0
-                              ? "All open pull requests already have reviews running."
-                              : `Review ${reviewablePullRequests.length} open pull request${
-                                  reviewablePullRequests.length === 1 ? "" : "s"
-                                } with ${reviewerLabels[pullRequestReviewer]}`
+                          reviewablePullRequests.length === 0
+                            ? hasActivePullRequestReview
+                              ? "Wait for the running pull-request review to finish or cancel it."
+                              : "There are no open pull requests to review."
+                            : `${allOpenPullRequestsReviewed ? "Re-review" : "Review"} ${reviewablePullRequests.length} open pull request${
+                                reviewablePullRequests.length === 1 ? "" : "s"
+                              } with ${reviewerLabels[pullRequestReviewer]}`
                         }
-                        aria-label={`Review all open pull requests with ${reviewerLabels[pullRequestReviewer]}`}
+                        aria-label={`${allOpenPullRequestsReviewed ? "Re-review" : "Review"} all open pull requests with ${reviewerLabels[pullRequestReviewer]}`}
                         onClick={() => {
                           setReviewingPullRequests(true);
                           setPullRequestReviewError("");
@@ -973,7 +1133,11 @@ export function TaskWorkspace({
                         }}
                       >
                         <Sparkles size={11} />
-                        {reviewingPullRequests ? "Launching…" : "Review"}
+                        {reviewingPullRequests
+                          ? "Launching…"
+                          : allOpenPullRequestsReviewed
+                            ? "Re-review"
+                            : "Review"}
                       </button>
                       <ReviewerSelector
                         reviewer={pullRequestReviewer}
@@ -1002,22 +1166,14 @@ export function TaskWorkspace({
                         key={pullRequest.id}
                         taskId={task.id}
                         resource={pullRequest}
-                        onReview={
-                          issueIdentity
-                            ? () =>
-                                onLaunchReview(
-                                  [pullRequest],
-                                  issueUrl,
-                                  pullRequestReviewer,
-                                )
-                            : undefined
+                        onReview={() =>
+                          onLaunchReview(
+                            [pullRequest],
+                            issueUrl,
+                            pullRequestReviewer,
+                          )
                         }
                         reviewer={pullRequestReviewer}
-                        reviewDisabledReason={
-                          !issueIdentity
-                            ? "Add the task’s GitHub issue link before starting a review."
-                            : undefined
-                        }
                         onCancelReview={onCancelReview}
                       />
                     ))}
@@ -1090,6 +1246,18 @@ export function TaskWorkspace({
                       <ExternalLink size={12} />
                     </button>
                   )}
+                  {workspaceContext && (
+                    <span
+                      className="workspace-context-chip"
+                      data-magnify={`${workspaceContext.worktree ? "Worktree" : "Branch"}\n${workspaceContext.branch}\n${workspaceContext.repository_root}`}
+                      title={`${workspaceContext.worktree ? "Worktree" : "Repository"}: ${workspaceContext.repository_root}\nBranch: ${workspaceContext.branch}`}
+                    >
+                      <GitBranch size={13} />
+                      {workspaceContext.worktree
+                        ? `${workspaceContext.repository_root.split("/").filter(Boolean).at(-1)} · ${workspaceContext.branch}`
+                        : workspaceContext.branch}
+                    </span>
+                  )}
                   {document.header.agent_session && (
                     <AgentSessionChip session={document.header.agent_session} />
                   )}
@@ -1115,6 +1283,7 @@ export function TaskWorkspace({
           taskId={task.id}
           active={active}
           textScale={textScale}
+          agentProvider={document.header.agent_session?.provider}
           onOutputActivity={(sessionId, output) => {
             renderedTerminalRef.current = { sessionId, output };
             scheduleTerminalPullRequestDiscovery();
@@ -1127,6 +1296,16 @@ export function TaskWorkspace({
     </div>
   );
 }
+
+export const TaskWorkspace = memo(
+  TaskWorkspaceComponent,
+  (previous, next) =>
+    previous.task === next.task &&
+    previous.document === next.document &&
+    previous.active === next.active &&
+    previous.presentationChange === next.presentationChange &&
+    previous.textScale === next.textScale,
+);
 
 function shellQuote(value: string) {
   return `'${value.replaceAll("'", `'\"'\"'`)}'`;
@@ -1442,18 +1621,17 @@ function ArtifactCard({
   reviewer,
   onReview,
   onCancelReview,
-  reviewDisabledReason,
 }: {
   taskId: string;
   resource: Resource;
   reviewer: ReviewProvider;
   onReview?: () => Promise<void>;
   onCancelReview?: (reviewRunId: string) => Promise<void>;
-  reviewDisabledReason?: string;
 }) {
   const [opening, setOpening] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [reviewCopied, setReviewCopied] = useState(false);
   const [error, setError] = useState("");
   const persistedReviewState = reportedReviewState(resource);
   const reviewState = reviewing ? "queued" : persistedReviewState;
@@ -1462,12 +1640,19 @@ function ArtifactCard({
     completedReviewCount(taskId, resource),
   );
   const reviewUrl = resource.metadata.review_url ?? "";
+  const reviewPath = resource.metadata.review_path ?? "";
   const reviewTaskId = resource.metadata.review_task_id ?? "";
-  const reviewable = ["github_pr", "local_document"].includes(resource.type);
+  const reviewable = ["github_pr", "local_document", "web_document"].includes(
+    resource.type,
+  );
   const pullRequestNumber =
     resource.type === "github_pr"
       ? githubPullRequestNumber(resource.path_or_url)
       : null;
+  const displayedTarget =
+    resource.type === "github_pr"
+      ? resource.path_or_url.replace(/^https:\/\/github\.com\//i, "")
+      : resource.path_or_url;
   const presentation = {
     local_document: {
       icon: <FileText size={17} />,
@@ -1501,13 +1686,13 @@ function ArtifactCard({
     <article className="artifact-card">
       <button
         className="artifact-link"
-        data-magnify={`${presentation.type}\n${resource.label}\n${resource.path_or_url}`}
+        data-magnify={`${presentation.type}\n${resource.label}\n${displayedTarget}`}
         disabled={opening}
         aria-label={`${presentation.openAction}: ${resource.label}`}
         onClick={() => {
           setOpening(true);
           setError("");
-          openArtifact(resource)
+          openArtifact(resource, taskId)
             .catch((nextError) =>
               setError(
                 nextError instanceof Error ? nextError.message : String(nextError),
@@ -1520,7 +1705,7 @@ function ArtifactCard({
         <span className="artifact-copy">
           <span className="artifact-kind">{presentation.type}</span>
           <strong>{resource.label}</strong>
-          <code>{resource.path_or_url}</code>
+          <code>{displayedTarget}</code>
         </span>
         <ExternalLink size={14} className="artifact-external" />
       </button>
@@ -1532,10 +1717,7 @@ function ArtifactCard({
             type="button"
             className="artifact-review-button"
             disabled={reviewInFlight || !onReview}
-            title={
-              reviewDisabledReason ??
-              `Launch a ${reviewerLabels[reviewer]} review task`
-            }
+            title={`Launch a ${reviewerLabels[reviewer]} review task`}
             aria-label={`Review ${resource.label} with ${reviewerLabels[reviewer]}`}
             onClick={() => {
               if (!onReview) return;
@@ -1590,34 +1772,89 @@ function ArtifactCard({
               </button>
             </span>
           )}
-          {reviewState === "posted" && reviewUrl && (
-            <button
-              type="button"
-              className="review-result-link"
-              onClick={() => {
-                void openArtifact({
-                  id: `${resource.id}-review`,
-                  type: "web_document",
-                  label: `Review of ${resource.label}`,
-                  path_or_url: reviewUrl,
-                  status: "reported",
-                  metadata: {},
-                }).catch((nextError) =>
-                  setError(
-                    nextError instanceof Error
-                      ? nextError.message
-                      : String(nextError),
-                  ),
-                );
-              }}
-            >
-              View review <ExternalLink size={11} />
-            </button>
-          )}
-          {reviewState === "posted" && !reviewUrl && (
+          {reviewState === "posted" &&
+            resource.type === "github_pr" &&
+            reviewUrl && (
+              <button
+                type="button"
+                className="review-result-link"
+                onClick={() => {
+                  void openArtifact({
+                    id: `${resource.id}-review`,
+                    type: "web_document",
+                    label: `Review of ${resource.label}`,
+                    path_or_url: reviewUrl,
+                    status: "reported",
+                    metadata: {},
+                  }).catch((nextError) =>
+                    setError(
+                      nextError instanceof Error
+                        ? nextError.message
+                        : String(nextError),
+                    ),
+                  );
+                }}
+              >
+                View review <ExternalLink size={11} />
+              </button>
+            )}
+          {reviewState === "posted" &&
+            ["local_document", "web_document"].includes(resource.type) &&
+            reviewPath && (
+              <span className="review-result-actions">
+                <button
+                  type="button"
+                  className="review-result-link"
+                  onClick={() => {
+                    void openArtifact({
+                      id: `${resource.id}-review`,
+                      type: "local_document",
+                      label: `Review of ${resource.label}`,
+                      path_or_url: reviewPath,
+                      status: "reported",
+                      metadata: {},
+                    }).catch((nextError) =>
+                      setError(
+                        nextError instanceof Error
+                          ? nextError.message
+                          : String(nextError),
+                      ),
+                    );
+                  }}
+                >
+                  View review <FileText size={11} />
+                </button>
+                <button
+                  type="button"
+                  className="review-result-link review-copy-button"
+                  aria-label={`Copy review of ${resource.label}`}
+                  title={reviewCopied ? "Copied" : "Copy review"}
+                  onClick={() => {
+                    setError("");
+                    void copyLocalReview(reviewPath)
+                      .then(() => {
+                        setReviewCopied(true);
+                        setTimeout(() => setReviewCopied(false), 1200);
+                      })
+                      .catch((nextError) =>
+                        setError(
+                          nextError instanceof Error
+                            ? nextError.message
+                            : String(nextError),
+                        ),
+                      );
+                  }}
+                >
+                  {reviewCopied ? <Check size={11} /> : <Copy size={11} />}
+                </button>
+              </span>
+            )}
+          {reviewState === "posted" &&
+            ((resource.type === "github_pr" && !reviewUrl) ||
+              (resource.type !== "github_pr" && !reviewPath)) && (
             <span className="artifact-review-status">
               <span className="review-state-dot" />
-              Review posted
+              Review complete
             </span>
           )}
           {reviewState === "failed" && (

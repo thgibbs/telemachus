@@ -21,7 +21,7 @@ Telemachus provides:
 - one durable task tab per live terminal session;
 - resumable Claude or Codex session IDs captured in each task header;
 - agent-maintained Status, Plan, Alerts, Artifacts, and PR sections;
-- questions and actions collected in a human To do section;
+- human actions collected in a To do section;
 - background Codex or Claude reviews for pull requests and local documents;
 - links from task context to local files, web documents, GitHub issues, and PRs;
 - accessible text scaling and hover magnification; and
@@ -49,9 +49,11 @@ guidance that matches the version of Telemachus you are running.
 - At least one reviewer CLI: [Codex CLI](https://developers.openai.com/codex/cli)
   or Claude Code, installed and authenticated
 
-Each task tab defaults both review panes to Codex. Install Codex, Claude Code,
-or both depending on which reviewers you intend to select. These CLIs are
-system prerequisites and are not installed by this project's npm dependencies.
+Each task tab defaults both review panes to the other agent: a Codex terminal
+defaults reviews to Claude, and a Claude terminal defaults reviews to Codex.
+Install Codex, Claude Code, or both depending on which reviewers you intend to
+select. These CLIs are system prerequisites and are not installed by this
+project's npm dependencies.
 
 ```bash
 npm install --global @openai/codex
@@ -74,6 +76,20 @@ cd telemachus
 npm install
 npm run desktop
 ```
+
+`npm run desktop` launches **Telemachus Dev** with the existing development
+application data. To build and install a separate production app in
+`~/Applications`, run:
+
+```bash
+npm run install:mac
+```
+
+The installer opens **Telemachus** after copying it. Right-click its Dock icon
+and choose **Options → Keep in Dock**. The installed app uses the production
+identifier `com.telemachus.desktop`, so its tasks and settings are isolated from
+Telemachus Dev. Reinstalling preserves the previous app bundle as a timestamped
+backup in the same Applications directory.
 
 The first launch creates an untitled task. Every terminal opened by Telemachus has
 the `agent-ui` command ready to use:
@@ -131,8 +147,7 @@ agent-ui artifact add pr "Checkout fix PR" \
 
 agent-ui todo add deploy "Deploy the release to production"
 
-agent-ui todo ask rollout "Which rollout should we use?" \
-  --choice Canary --choice "All at once" --timeout 300
+agent-ui todo add rollout "Choose the rollout strategy" --blocking --timeout 300
 ```
 
 Use stable IDs such as `reproduce`, `cache-risk`, and `rollout`; subsequent
@@ -152,21 +167,23 @@ Closed PRs and failed lookups are not added.
 Every open PR and local-document artifact has a **Review** button. The
 Artifacts and PRs headings also provide bulk review actions for their eligible
 items. An arrow-only menu beside each heading's Review button selects Codex or
-Claude for that pane in that task tab. Both panes default to Codex and remember
-their choices independently; newly added documents and PRs automatically use
-their containing pane's reviewer.
+Claude for that pane in that task tab. Both panes default to the opposite of
+the attached terminal agent and remember explicit choices independently; newly
+added documents and PRs automatically use their containing pane's reviewer.
 
 Reviews run non-interactively in an isolated temporary Git workspace and do not
 create or replace a terminal tab. Codex uses `codex exec` with `gpt-5.6-sol` at
 high reasoning. Claude runs headlessly with `claude -p`. The selected reviewer
 receives the linked GitHub issue and artifacts. PR reviews are submitted to
-their pull requests, while local-document findings are posted as a comment on
-the linked issue.
-Cards show **Reviewing** while a run is active and link directly to
-**View review** after it posts. The action then becomes **Re-review**, with
-completed re-reviews counted on the card. A run that exits without a newly
-posted result is shown as failed and can be retried. Active reviews can be
-cancelled from their cards; Telemachus terminates the background reviewer
+their pull requests. Local-document reviews are saved as temporary Markdown
+files instead of being posted to GitHub; their cards can copy the review or
+open it in Zed. Local-document re-reviews receive the prior saved review as
+explicitly labeled historical context.
+Cards show **Reviewing** while a run is active and provide **View review** after
+it completes. The action then becomes **Re-review**, with completed re-reviews
+counted on the card. A run that exits without a newly submitted PR review or
+nonempty local review file is shown as failed and can be retried. Active reviews
+can be cancelled from their cards; Telemachus terminates the background reviewer
 and also cleans up active review processes when a task or the app closes.
 
 ![Telemachus artifacts and pull requests with review controls and live review states](images/screenshot2.png)
@@ -234,12 +251,15 @@ Telemachus injects these values into every child terminal:
 - `AGENT_UI_CLI` — absolute path to the installed command
 - `AGENT_UI_ENDPOINT` — random loopback bridge address
 - `AGENT_UI_TASK_ID` — current task scope
-- `AGENT_UI_TOKEN` — random token for this task and app session
+- `AGENT_UI_CREDENTIAL` — random credential for this task and app session
+- `AGENT_UI_TOKEN` — backward-compatible alias for the same credential
 - `AGENT_UI_PROTOCOL_VERSION` — presentation protocol version
 - `AGENT_UI_SOURCE` — default operation source
 
-The token is passed directly to child processes and is not written to shell
-history or persisted by the application.
+The credential is passed directly to child processes and is not written to
+shell history or persisted by the application. The filter-safe
+`AGENT_UI_CREDENTIAL` name lets Codex lifecycle hooks authenticate even when
+Codex applies its default subprocess filter for names containing `TOKEN`.
 
 Claude and Codex `SessionStart` hooks can pipe their JSON input to:
 
@@ -287,8 +307,8 @@ Large, and Extra large text sizes. This scales both application text and the
 embedded terminal.
 
 Agent-originated changes briefly highlight the affected task header, To do,
-Plan, Artifacts, Status, or Alerts section. Human actions such as answering a
-question, completing a todo, or clearing an alert do not trigger that highlight.
+Plan, Artifacts, Status, or Alerts section. Human actions such as completing a
+todo or clearing an alert do not trigger that highlight.
 
 For development outside a Telemachus terminal, `npm link` exposes the same
 `agent-ui` command globally, but write commands still require the task-scoped
@@ -345,7 +365,9 @@ blocking-wait, and restart behavior.
 ## Current MVP boundaries
 
 - One live terminal per task; terminal processes end when the app exits.
-- Presentation state and panel dimensions restore after restart.
+- Presentation state and panel dimensions restore after restart. Tabs with a
+  saved Claude or Codex session automatically launch that provider's resume
+  command in a new terminal.
 - Task deletion is explicit and revokes scoped bridge access.
 - No transcript persistence, archive browser, remote terminals, cloud sync,
   repository features, or autonomous orchestration.

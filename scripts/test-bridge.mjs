@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import http from "node:http";
 import { once } from "node:events";
+import { fileURLToPath } from "node:url";
 
 const operations = [];
 const idempotentResponses = new Map();
@@ -168,6 +169,7 @@ const env = {
   ...process.env,
   AGENT_UI_ENDPOINT: `http://127.0.0.1:${address.port}`,
   AGENT_UI_TASK_ID: taskId,
+  AGENT_UI_CREDENTIAL: token,
   AGENT_UI_TOKEN: token,
   AGENT_UI_PROTOCOL_VERSION: "1.0",
   AGENT_UI_SOURCE: "bridge-test",
@@ -209,6 +211,8 @@ assert.ok(Buffer.byteLength(instructions.stdout) <= 3 * 1024);
 assert.match(instructions.stdout, /run `agent-ui help`/);
 assert.match(instructions.stdout, /## Write short\n/);
 assert.match(instructions.stdout, /## Plan = the work, not your process\n/);
+assert.match(instructions.stdout, /high-level, end-to-end plan for the GitHub issue/);
+assert.match(instructions.stdout, /Status covers the current stage/);
 assert.match(instructions.stdout, /## Alerts vs\. to dos\n/);
 assert.doesNotMatch(instructions.stdout, /## Task header\n/);
 
@@ -243,6 +247,50 @@ const attachedSession = await run(
 assert.equal(attachedSession.stdout, "");
 assert.equal(document.header.agent_session.provider, "claude");
 assert.equal(document.header.agent_session.session_id, "claude-session-123");
+
+async function runNestedCodexHook(marker) {
+  const hookPath = fileURLToPath(
+    new URL("hooks/agent-ui-codex-session-start.sh", import.meta.url),
+  );
+  const cliPath = fileURLToPath(
+    new URL("../bin/agent-ui.mjs", import.meta.url),
+  );
+  return new Promise((resolve, reject) => {
+    const child = spawn("bash", [hookPath], {
+      cwd: new URL("..", import.meta.url),
+      env: {
+        ...env,
+        AGENT_UI_CLI: cliPath,
+        [marker]: "1",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+    child.stdin.end(
+      JSON.stringify({
+        session_id: "nested-codex-session",
+        cwd: "/tmp/bridge-project",
+        hook_event_name: "SessionStart",
+        source: "startup",
+      }),
+    );
+  });
+}
+
+for (const marker of ["CLAUDECODE", "CLAUDE_PLUGIN_ROOT"]) {
+  const operationCount = operations.length;
+  const nestedHook = await runNestedCodexHook(marker);
+  assert.equal(nestedHook.code, 0, nestedHook.stderr);
+  assert.equal(nestedHook.stdout, "");
+  assert.equal(operations.length, operationCount);
+  assert.equal(document.header.agent_session.provider, "claude");
+  assert.equal(document.header.agent_session.session_id, "claude-session-123");
+}
 
 await run("bin/agent-ui.mjs", [
   "task",
@@ -395,8 +443,6 @@ assert.equal(JSON.parse(actionTodo.stdout).kind, "action");
 const actionTodos = await run("bin/agent-ui.mjs", [
   "todo",
   "list",
-  "--kind",
-  "action",
   "--state",
   "open",
   "--compact",
@@ -404,35 +450,6 @@ const actionTodos = await run("bin/agent-ui.mjs", [
 assert.deepEqual(
   JSON.parse(actionTodos.stdout).map((todo) => todo.id),
   ["deploy"],
-);
-
-await run("bin/agent-ui.mjs", [
-  "todo",
-  "ask",
-  "rollout",
-  "Which rollout?",
-  "--choice",
-  "Canary",
-  "--choice",
-  "All at once",
-  "--non-blocking",
-]);
-const question = await run("bin/agent-ui.mjs", [
-  "question",
-  "get",
-  "rollout",
-  "--compact",
-]);
-assert.equal(JSON.parse(question.stdout).state, "open");
-assert.equal(JSON.parse(question.stdout).kind, "question");
-const legacyQuestionList = await run("bin/agent-ui.mjs", [
-  "question",
-  "list",
-  "--compact",
-]);
-assert.deepEqual(
-  JSON.parse(legacyQuestionList.stdout).map((todo) => todo.id),
-  ["rollout"],
 );
 
 await run(
@@ -494,11 +511,23 @@ const missingContext = await runRaw(
   {
     AGENT_UI_ENDPOINT: "",
     AGENT_UI_TASK_ID: "",
+    AGENT_UI_CREDENTIAL: "",
     AGENT_UI_TOKEN: "",
   },
 );
 assert.equal(missingContext.code, 4);
 assert.equal(JSON.parse(missingContext.stderr).error.code, "missing_task_context");
+
+const filterSafeCredential = await runRaw(
+  "bin/agent-ui.mjs",
+  ["doctor"],
+  "",
+  {
+    AGENT_UI_CREDENTIAL: token,
+    AGENT_UI_TOKEN: "",
+  },
+);
+assert.equal(filterSafeCredential.code, 0);
 
 const idempotencyKey = "stable-test-key";
 const firstIdempotent = await run("bin/agent-ui.mjs", [
@@ -554,7 +583,7 @@ const responses = mcp.stdout
   .split("\n")
   .map((line) => JSON.parse(line));
 assert.equal(responses[0].result.serverInfo.name, "agent-ui");
-assert.equal(responses[1].result.tools.length, 13);
+assert.equal(responses[1].result.tools.length, 11);
 assert.equal(responses[2].result.structuredContent.protocol_version, "1.0");
 assert.equal(
   responses[3].result.structuredContent.questions.find(

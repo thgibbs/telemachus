@@ -11,7 +11,7 @@ Task ID, bridge address, and credentials are injected automatically — do not c
 Start with \`agent-ui doctor\`, then \`agent-ui context --compact\`.
 **For syntax, flags, examples, and valid enum values, run \`agent-ui help\` — consult it rather than guessing.**
 Commands: \`task set|status\`, \`plan add|update|remove\`, \`summary set\`, \`alert raise|upsert|clear\`,
-\`artifact add|update|remove\`, \`todo add|ask|get\`, \`publish --stdin\`.
+\`artifact add|update|remove\`, \`todo add|get\`, \`publish --stdin\`.
 
 ## Write short
 
@@ -29,10 +29,10 @@ work \`completed\`.
 
 ## Plan = the work, not your process
 
-One item per stage of the thing being built. "Read the issue", "search the codebase", and
-"write the file" are how you complete a stage, not stages themselves. The title is the stage
-name (\`Phase 2\`); the detail is one line ending in that stage's completion condition. If a
-written plan already exists, mirror its structure so the two read the same.
+The plan is the high-level, end-to-end plan for the GitHub issue. It must show every stage for
+the issue — completed, current, and future — rather than only the stage being worked on now.
+"Read the issue" and "write the file" are working steps, not stages. Use the stage name as the
+title (\`Phase 2\`) and one outcome line as its detail. Mirror any written plan that exists.
 
 ## Alerts vs. to dos
 
@@ -41,9 +41,9 @@ The test is whether the human owes something.
 - **Alert** — you are telling them. Findings, risks, caveats. They read it and move on.
 - **Todo** — they must act or answer. Deploy, merge, approve, choose, or supply a fact.
 
-Never put a decision request in an alert — it gets read and forgotten. The To do pane is where
-the human looks for what they owe you. An observation with no decision attached is an alert,
-not a todo. Make a question blocking only when no useful work can continue without the answer,
+Never put a decision request in an alert — it gets read and forgotten. Record it as an action
+in To do, and ask for the answer in the terminal conversation. An observation with no decision
+attached is an alert, not a todo. Make an action blocking only when no useful work can continue,
 and never use one to dodge a safe, reversible engineering call.
 
 ## Details worth knowing
@@ -52,7 +52,8 @@ and never use one to dodge a safe, reversible engineering call.
 - The task's issue goes in \`task set --issue-url\`, not Artifacts.
 - Artifacts are durable references — plans, design docs, open PRs, generated reports — not
   every file touched along the way.
-- Status is a handoff: someone back from coffee reads two lines and can continue.
+- Status covers the current stage and the work happening within it; someone back from coffee
+  reads two lines and can continue.
 - Exit 2 = another writer moved the screen; re-read \`context\`, reconcile, retry.
   Exit 3 = blocking todo timed out. Exit 4 = bridge or authentication is down.
 `;
@@ -121,8 +122,8 @@ The two are not interchangeable. The test is whether the human owes something.
   choosing, or supplying a fact all belong in the To do pane.
 
 Never put a decision request in an alert. "Needs your sign-off", "which of these should
-I do", "confirm before I proceed" — all of those belong in \`todo add\` or \`todo ask\`,
-even when a plain-text message in the conversation also asks. The To do pane is where
+I do", and "confirm before I proceed" all belong in \`todo add\`. Ask the actual question
+in the terminal conversation. The To do pane is where
 the human looks for what they owe you; an alert phrased as a request just gets read and
 forgotten.
 
@@ -168,10 +169,11 @@ Task statuses:
 
 ## Plan
 
-**The plan is the work, not your process.** Use one item for each stage or phase of the
-thing being built. Your own working steps ("read the issue", "search the codebase",
-"write the file") do not belong here; they are how you complete a stage, not stages
-themselves.
+**The plan is the high-level plan for the entire GitHub issue, not a plan for only the
+stage currently being worked on.** Use one item for every stage or phase needed to close
+the issue, retaining completed stages and including the current and future stages. Your
+own working steps ("read the issue", "search the codebase", "write the file") do not
+belong here; they are how you complete a stage, not stages themselves.
 
 The title should be only the stage name, such as \`Phase 1\`, \`Phase 2\`, or the
 milestone name used by the source plan. The description must be one concise line
@@ -248,9 +250,10 @@ Example plan JSON:
 
 ## Status
 
-Status is the short handoff for where the work stands right now. Apply the coffee test:
-someone who steps away and comes back should be able to read one or two lines and
-immediately recover enough context to continue.
+Status is the short handoff for the current stage: identify that stage and say what is
+being worked on within it right now. Apply the coffee test: someone who steps away and
+comes back should be able to read one or two lines and immediately recover enough
+context to continue.
 
 Good status examples:
 
@@ -259,16 +262,14 @@ Good status examples:
 - "We are closing out phase 2 and about to start phase 3."
 - "I am waiting for your go-ahead to deploy."
 
-Write the Status pane with the \`summary\` command. Keep it concise and focused on
-the current handoff:
+Write the current Status headline with \`task status --message\`. Keep it concise
+and focused on the current handoff:
 
 \`\`\`bash
-agent-ui summary set \\
-  --headline "Duplicate retries are prevented" \\
-  --body "Checkout attempts now reuse the original idempotency key."
+agent-ui task status working --message "Reviewing PR #123"
 \`\`\`
 
-Add structured sections when useful:
+Use \`summary set\` only when useful structured detail belongs below that headline:
 
 \`\`\`bash
 agent-ui summary set \\
@@ -429,13 +430,13 @@ older instructions; it updates this same Artifacts collection.
 
 ## Human to dos
 
-Todos are questions and tasks for the human. Anything the human needs to answer or do
-goes here: deploy, merge, review, approve, make a scope call, express a preference, or
-provide a fact only they have.
+Todos are actions the human needs to take. Anything the human needs to answer or do
+goes here as an action: deploy, merge, review, approve, make a scope call, express a
+preference, or provide a fact only they have. Ask questions in the terminal conversation.
 
 Good todo examples:
 
-- "Should I implement this for all tenants or just one?"
+- "Choose whether this applies to all tenants or one tenant."
 - "Deploy main — we cannot proceed until it is deployed."
 - "Run SQL command A — I do not have access to production."
 
@@ -444,7 +445,7 @@ Add an action when the human needs to perform work:
 \`\`\`bash
 agent-ui todo add deploy "Deploy the release to production"
 agent-ui todo add merge "Merge PR #42 after checks pass"
-agent-ui todo list --kind action --state open
+agent-ui todo list --state open
 \`\`\`
 
 Actions return immediately by default. Add \`--blocking\` only when no useful agent work
@@ -455,37 +456,10 @@ agent-ui todo add review "Review the production migration plan" \\
   --blocking --timeout 300
 \`\`\`
 
-Use a question when the human needs to answer. Choose blocking or non-blocking by
-whether work can continue meanwhile, not by how important the answer is.
-
-Ask a blocking question when work cannot continue without an answer:
-
-\`\`\`bash
-agent-ui todo ask rollout "Which rollout should we use?" \\
-  --choice Canary \\
-  --choice "All at once" \\
-  --timeout 300
-\`\`\`
-
-The command waits for the answer. It exits with code \`3\` if the question times
-out or is cancelled.
-
-Create a non-blocking question when other work can continue:
-
-\`\`\`bash
-agent-ui todo ask naming "Which name do you prefer?" --non-blocking
-agent-ui todo get naming
-agent-ui todo list --kind question --state open
-\`\`\`
-
-Create a non-blocking question when the answer shapes later work but there is still
-useful work to do now — a scope call on a plan you have already delivered, for example.
-
-Do not use a question as a substitute for making a safe, reversible engineering
-decision.
-
-\`agent-ui question list|get|ask\` remains available for compatibility, but new
-instructions should use the unified \`todo\` command.
+When the human owes an answer, add a concise action such as "Choose the rollout
+strategy", then ask the question in the terminal. Do not encode choices or an answer
+form in the To do pane. Do not use a blocking todo as a substitute for making a safe,
+reversible engineering decision.
 
 ## Publish a complete screen
 
@@ -678,14 +652,18 @@ if (!["json", "text", "quiet", "document"].includes(outputMode)) {
 
 const endpoint = process.env.AGENT_UI_ENDPOINT;
 const taskId = process.env.AGENT_UI_TASK_ID;
-const token = process.env.AGENT_UI_TOKEN;
+// Codex removes subprocess environment variables whose names contain TOKEN,
+// KEY, or SECRET by default. Prefer the filter-safe alias while retaining the
+// original name for older Telemachus terminals and other integrations.
+const token =
+  process.env.AGENT_UI_CREDENTIAL || process.env.AGENT_UI_TOKEN;
 const protocolVersion = process.env.AGENT_UI_PROTOCOL_VERSION || "1.0";
 
 function requireContext() {
   const missing = [
     ["AGENT_UI_ENDPOINT", endpoint],
     ["AGENT_UI_TASK_ID", taskId],
-    ["AGENT_UI_TOKEN", token],
+    ["AGENT_UI_CREDENTIAL (or AGENT_UI_TOKEN)", token],
   ]
     .filter(([, value]) => !value)
     .map(([name]) => name);
@@ -1245,88 +1223,14 @@ async function artifactCommand(subcommand, noun = "artifact") {
   );
 }
 
-async function questionCommand(subcommand, noun = "question") {
-  if (subcommand === "list") {
-    const body = await context();
-    const state = takeOption("state");
-    ensureNoOptions();
-    const questions = body.document.questions.filter(
-      (item) =>
-        (item.kind ?? "question") === "question" &&
-        (!state || item.state === state),
-    );
-    print(questions);
-    return;
-  }
-  if (subcommand === "get") {
-    const id = argv.shift();
-    if (!id) usageError(`${noun} get requires ID`);
-    ensureNoOptions();
-    const body = await context();
-    const question = body.document.questions.find(
-      (item) => item.id === id && (item.kind ?? "question") === "question",
-    );
-    if (!question) {
-      throw new CliError("question_not_found", `no question named ${id}`);
-    }
-    print(question);
-    return;
-  }
-  if (subcommand === "ask") {
-    const id = argv.shift();
-    const textOption = takeOption("text");
-    const text = textOption ?? takePositional();
-    if (!id || !text) usageError(`${noun} ask requires ID and TEXT`);
-    const choices = takeOptions("choice");
-    const blocking = !takeFlag("non-blocking");
-    const waitSeconds = blocking
-      ? parseInteger(takeOption("timeout", "300"), "timeout", 1)
-      : 0;
-    const allowFreeText = !takeFlag("no-free-text");
-    ensureNoOptions();
-    const body = await operate(
-      "ask_user",
-      {
-        id,
-        kind: "question",
-        text,
-        blocking,
-        choices,
-        allow_free_text: allowFreeText,
-        answer: null,
-        state: "open",
-        created_at: new Date().toISOString(),
-      },
-      { waitSeconds },
-    );
-    printWrite(body, "ask_user");
-    if (body.wait && body.wait.status !== "answered") {
-      process.exitCode = 3;
-    }
-    return;
-  }
-  usageError(`${noun} requires list, get, or ask`);
-}
-
 async function todoCommand(subcommand) {
-  if (subcommand === "ask") {
-    return questionCommand("ask", "todo");
-  }
   if (subcommand === "list") {
     const body = await context();
     const state = takeOption("state");
-    const kind = takeOption("kind");
-    if (kind && !["question", "action"].includes(kind)) {
-      usageError("--kind must be question or action");
-    }
     ensureNoOptions();
     const todos = body.document.questions
-      .filter(
-        (item) =>
-          (!state || item.state === state) &&
-          (!kind || (item.kind ?? "question") === kind),
-      )
-      .map((item) => ({ kind: "question", ...item }));
+      .filter((item) => !state || item.state === state)
+      .map((item) => ({ ...item, kind: "action" }));
     print(todos);
     return;
   }
@@ -1339,7 +1243,7 @@ async function todoCommand(subcommand) {
     if (!todo) {
       throw new CliError("todo_not_found", `no todo named ${id}`);
     }
-    print({ kind: "question", ...todo });
+    print({ ...todo, kind: "action" });
     return;
   }
   if (subcommand === "add") {
@@ -1377,7 +1281,7 @@ async function todoCommand(subcommand) {
     }
     return;
   }
-  usageError("todo requires list, get, add, or ask");
+  usageError("todo requires list, get, or add");
 }
 
 async function publishCommand() {
@@ -1554,7 +1458,7 @@ Read:
   agent-ui summary get
   agent-ui alert list
   agent-ui artifact list
-  agent-ui todo list [--state open] [--kind question|action]
+  agent-ui todo list [--state open]
   agent-ui todo get ID
 
 Write task state:
@@ -1589,12 +1493,9 @@ Write summary, alerts, and artifacts:
 
 Compatibility:
   agent-ui resource ...    Alias for agent-ui artifact ...
-  agent-ui question ...    Question-only alias for agent-ui todo ...
 
 Human to dos:
   agent-ui todo add ID TEXT [--blocking] [--timeout SECONDS]
-  agent-ui todo ask ID TEXT [--choice VALUE ...] [--timeout SECONDS]
-  agent-ui todo ask ID TEXT --non-blocking
 
 Whole-screen and low-level updates:
   agent-ui publish --file presentation.json
@@ -1617,8 +1518,9 @@ Exit codes:
   4 bridge unavailable or authentication failed
   64 command usage error
 
-The app injects AGENT_UI_ENDPOINT, AGENT_UI_TASK_ID, AGENT_UI_TOKEN,
-AGENT_UI_PROTOCOL_VERSION, AGENT_UI_SOURCE, and AGENT_UI_CLI into each terminal.
+The app injects AGENT_UI_ENDPOINT, AGENT_UI_TASK_ID, AGENT_UI_CREDENTIAL,
+AGENT_UI_TOKEN, AGENT_UI_PROTOCOL_VERSION, AGENT_UI_SOURCE, and AGENT_UI_CLI
+into each terminal.
 No MCP setup is required.
 `);
   process.stdout.write(
@@ -1660,9 +1562,6 @@ async function main() {
   } else if (command === "resources") {
     argv.unshift("replace");
     command = "resource";
-  } else if (command === "ask") {
-    argv.unshift("ask");
-    command = "question";
   } else if (command === "op") {
     command = "apply";
   }
@@ -1691,7 +1590,6 @@ async function main() {
   if (command === "resource") return artifactCommand(argv.shift(), "resource");
   if (command === "artifact") return artifactCommand(argv.shift());
   if (command === "todo") return todoCommand(argv.shift());
-  if (command === "question") return questionCommand(argv.shift());
   if (command === "publish") return publishCommand();
   if (command === "demo") return demo();
   if (command === "apply") {

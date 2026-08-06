@@ -15,6 +15,7 @@ import type {
   TaskSession,
   TerminalOutput,
   TerminalSnapshot,
+  WorkspaceContext,
 } from "../types";
 import { emptyDocument } from "../types";
 
@@ -151,13 +152,10 @@ function applyBrowserOperation(
         Pick<Question, "id" | "text">;
       const question: Question = {
         id: incoming.id,
-        kind: incoming.kind ?? "question",
+        kind: "action",
         text: incoming.text,
-        choices: incoming.kind === "action" ? [] : (incoming.choices ?? []),
-        allow_free_text:
-          incoming.kind === "action"
-            ? false
-            : (incoming.allow_free_text ?? true),
+        choices: [],
+        allow_free_text: false,
         blocking: incoming.blocking ?? true,
         answer: incoming.answer ?? null,
         state: incoming.state ?? "open",
@@ -234,44 +232,30 @@ export async function applyOperation(
   return next;
 }
 
-export async function answerQuestion(
-  taskId: string,
-  questionId: string,
-  answer: string,
-): Promise<PresentationDocument> {
-  if (isTauri())
-    return invoke("answer_question", { taskId, questionId, answer });
-  const docs = readBrowserDocs();
-  const next = structuredClone(docs[taskId] ?? emptyDocument(taskId));
-  next.questions = next.questions.map((q) =>
-    q.id === questionId ? { ...q, answer, state: "answered" as const } : q,
-  );
-  next.revision += 1;
-  next.updated_at = new Date().toISOString();
-  docs[taskId] = next;
-  storeBrowserDocs(docs);
-  window.dispatchEvent(
-    new CustomEvent("browser-presentation-updated", {
-      detail: {
-        task_id: taskId,
-        source: "human",
-        op_type: "answer_question",
-      },
-    }),
-  );
-  return next;
-}
-
 export async function completeTodo(
   taskId: string,
   todoId: string,
 ): Promise<PresentationDocument> {
-  if (isTauri()) return invoke("complete_todo", { taskId, todoId });
+  return setTodoCompleted(taskId, todoId, true);
+}
+
+export async function setTodoCompleted(
+  taskId: string,
+  todoId: string,
+  completed: boolean,
+): Promise<PresentationDocument> {
+  if (isTauri()) {
+    return invoke("set_todo_completed", { taskId, todoId, completed });
+  }
   const docs = readBrowserDocs();
   const next = structuredClone(docs[taskId] ?? emptyDocument(taskId));
   next.questions = next.questions.map((todo) =>
     todo.id === todoId
-      ? { ...todo, answer: null, state: "completed" as const }
+      ? {
+          ...todo,
+          answer: null,
+          state: completed ? ("completed" as const) : ("open" as const),
+        }
       : todo,
   );
   next.revision += 1;
@@ -283,11 +267,78 @@ export async function completeTodo(
       detail: {
         task_id: taskId,
         source: "human",
-        op_type: "complete_todo",
+        op_type: completed ? "complete_todo" : "reopen_todo",
       },
     }),
   );
   return next;
+}
+
+export async function dismissTodo(
+  taskId: string,
+  todoId: string,
+): Promise<PresentationDocument> {
+  if (isTauri()) return invoke("dismiss_todo", { taskId, todoId });
+  const docs = readBrowserDocs();
+  const next = structuredClone(docs[taskId] ?? emptyDocument(taskId));
+  next.questions = next.questions.map((todo) =>
+    todo.id === todoId
+      ? { ...todo, answer: null, state: "cancelled" as const }
+      : todo,
+  );
+  next.revision += 1;
+  next.updated_at = new Date().toISOString();
+  docs[taskId] = next;
+  storeBrowserDocs(docs);
+  window.dispatchEvent(
+    new CustomEvent("browser-presentation-updated", {
+      detail: {
+        task_id: taskId,
+        source: "human",
+        op_type: "dismiss_todo",
+      },
+    }),
+  );
+  return next;
+}
+
+export async function clearAllAlerts(
+  taskId: string,
+): Promise<PresentationDocument> {
+  if (isTauri()) return invoke("clear_all_alerts", { taskId });
+  const docs = readBrowserDocs();
+  const next = structuredClone(docs[taskId] ?? emptyDocument(taskId));
+  next.alerts = next.alerts.map((alert) => ({ ...alert, state: "cleared" }));
+  next.revision += 1;
+  next.updated_at = new Date().toISOString();
+  docs[taskId] = next;
+  storeBrowserDocs(docs);
+  return next;
+}
+
+export async function dismissAllTodos(
+  taskId: string,
+): Promise<PresentationDocument> {
+  if (isTauri()) return invoke("dismiss_all_todos", { taskId });
+  const docs = readBrowserDocs();
+  const next = structuredClone(docs[taskId] ?? emptyDocument(taskId));
+  next.questions = next.questions.map((todo) => ({
+    ...todo,
+    answer: null,
+    state: "cancelled" as const,
+  }));
+  next.revision += 1;
+  next.updated_at = new Date().toISOString();
+  docs[taskId] = next;
+  storeBrowserDocs(docs);
+  return next;
+}
+
+export async function getWorkspaceContext(
+  taskId: string,
+): Promise<WorkspaceContext | null> {
+  if (isTauri()) return invoke("get_workspace_context", { taskId });
+  return null;
 }
 
 export async function updateLayout(
@@ -384,9 +435,13 @@ export async function getBridgeInfo(taskId: string): Promise<BridgeInfo> {
   };
 }
 
-export async function openArtifact(resource: Resource): Promise<void> {
+export async function openArtifact(
+  resource: Resource,
+  taskId?: string,
+): Promise<void> {
   if (isTauri()) {
     return invoke("open_artifact", {
+      taskId,
       artifactType: resource.type,
       target: resource.path_or_url,
     });
@@ -400,6 +455,15 @@ export async function openArtifact(resource: Resource): Promise<void> {
     "noopener,noreferrer",
   );
   if (!opened) throw new Error("The browser blocked the artifact link.");
+}
+
+export async function copyLocalReview(reviewPath: string): Promise<void> {
+  if (isTauri()) {
+    return invoke("copy_local_review", { reviewPath });
+  }
+  throw new Error(
+    "Local reviews can be copied from the Telemachus desktop app.",
+  );
 }
 
 export async function getClosedGithubPullRequests(
@@ -439,7 +503,9 @@ export async function launchArtifactReview(
         .filter((resource) => resource.type === "github_pr")
         .map((resource) => resource.path_or_url),
       documentPaths: resources
-        .filter((resource) => resource.type === "local_document")
+        .filter((resource) =>
+          ["local_document", "web_document"].includes(resource.type),
+        )
         .map((resource) => resource.path_or_url),
       issueUrl,
       reviewer,
